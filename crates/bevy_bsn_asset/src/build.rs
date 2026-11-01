@@ -22,8 +22,8 @@ use thiserror::Error;
 
 use crate::{
     scene::{
-        DynamicName, DynamicPatch, DynamicPatchValue, DynamicRelation, DynamicScene,
-        DynamicSceneEntity, DynamicSceneInner,
+        DynamicDescendantPatch, DynamicName, DynamicPatch, DynamicPatchValue, DynamicRelation,
+        DynamicScene, DynamicSceneEntity, DynamicSceneInner,
     },
     value::{self, EnumInput},
 };
@@ -41,6 +41,18 @@ const MAX_DEPTH: u32 = 128;
 /// the file name and turns the span into a line/column pair.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum DynamicSceneBuildError {
+    /// A `patch #Name { … }` block on an entity with no `:"base.bsn"` to patch.
+    #[error("`patch #Name {{ … }}` patches a descendant inherited from a `:\"base.bsn\"`, and this entity has no base")]
+    PatchWithoutBase {
+        /// Where the block is.
+        span: Span,
+    },
+    /// A `patch #Name { … }` block that sets the descendant's `Name`, which is how it is found.
+    #[error("a `patch #Name {{ … }}` block cannot rename the descendant it patches")]
+    PatchRenames {
+        /// Where the `Name` patch is.
+        span: Span,
+    },
     /// A named type is not in the [`TypeRegistry`].
     #[error("`{type_path}` is not a registered type. Register it with `app.register_type::<{type_path}>()`.")]
     UnknownType {
@@ -247,6 +259,8 @@ impl DynamicSceneBuildError {
             Self::UnknownType { span, .. }
             | Self::TypeNotRegistered { span, .. }
             | Self::MissingReflectDefault { span, .. }
+            | Self::PatchWithoutBase { span }
+            | Self::PatchRenames { span }
             | Self::MissingReflectComponent { span, .. }
             | Self::UnknownVariant { span, .. }
             | Self::TypeNotStruct { span, .. }
@@ -401,6 +415,7 @@ impl DynamicScene {
                     name: None,
                     patches: Vec::new(),
                     relations: Vec::new(),
+                    descendant_patches: Vec::new(),
                 },
                 Some((first, rest)) => {
                     if let Some(second) = rest.first() {
@@ -461,6 +476,7 @@ fn build_entity(
         base_span,
         patches,
         relations,
+        descendant_patches,
         ..
     } = &node.kind
     else {
@@ -505,12 +521,72 @@ fn build_entity(
         built_relations.push(build_relation(cx, *relation)?);
     }
 
+    if base.is_none()
+        && let Some(first) = descendant_patches.first()
+    {
+        return Err(DynamicSceneBuildError::PatchWithoutBase {
+            span: cx.document.node(*first).map_or(span, |node| node.span),
+        });
+    }
+    let mut built_descendant_patches = Vec::with_capacity(descendant_patches.len());
+    for patch in descendant_patches {
+        built_descendant_patches.push(build_descendant_patch(cx, *patch)?);
+    }
+
     cx.exit();
     Ok(DynamicSceneEntity {
         base,
         name,
         patches: built_patches,
         relations: built_relations,
+        descendant_patches: built_descendant_patches,
+    })
+}
+
+/// Builds one `patch #Name { … }` block, recursing into the blocks nested in it.
+fn build_descendant_patch(
+    cx: &mut BuildCx,
+    node_id: BsnNodeId,
+) -> Result<DynamicDescendantPatch, DynamicSceneBuildError> {
+    let node = cx
+        .document
+        .node(node_id)
+        .ok_or_else(|| malformed(format!("no node with id {}", node_id.0), Span::NONE))?;
+    let span = node.span;
+    cx.enter(span)?;
+    let BsnNodeKind::DescendantPatch {
+        name,
+        patches,
+        descendant_patches,
+        ..
+    } = &node.kind
+    else {
+        return Err(malformed(
+            format!("node {} is not a descendant patch", node_id.0),
+            span,
+        ));
+    };
+
+    let mut built_patches = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let built = build_patch(cx, *patch)?;
+        if built.component_type_id == TypeId::of::<Name>() {
+            return Err(DynamicSceneBuildError::PatchRenames {
+                span: cx.document.node(*patch).map_or(span, |node| node.span),
+            });
+        }
+        built_patches.push(built);
+    }
+    let mut built_descendant_patches = Vec::with_capacity(descendant_patches.len());
+    for patch in descendant_patches {
+        built_descendant_patches.push(build_descendant_patch(cx, *patch)?);
+    }
+
+    cx.exit();
+    Ok(DynamicDescendantPatch {
+        name: Name::new(name.clone()),
+        patches: built_patches,
+        descendant_patches: built_descendant_patches,
     })
 }
 
@@ -1187,6 +1263,7 @@ mod tests {
                 base_span: None,
                 patches: Vec::new(),
                 relations: Vec::new(),
+                descendant_patches: Vec::new(),
             });
             document.push_root(id);
         }
@@ -1225,6 +1302,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         let root = document.push_node(BsnNodeKind::Entity {
             name: None,
@@ -1233,6 +1311,7 @@ mod tests {
             base_span: None,
             patches: vec![inner],
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
@@ -1251,6 +1330,7 @@ mod tests {
             base_span: None,
             patches: vec![patch],
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
@@ -1270,6 +1350,7 @@ mod tests {
             base_span: None,
             patches: vec![patch],
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
@@ -1283,6 +1364,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         let root = document.push_node(BsnNodeKind::Entity {
             name: None,
@@ -1291,6 +1373,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: vec![inner],
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
@@ -1310,6 +1393,7 @@ mod tests {
             base_span: None,
             patches: vec![patch],
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(matches!(
@@ -1342,6 +1426,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: vec![relation],
+            descendant_patches: Vec::new(),
         });
         document.nodes[relation.0 as usize].kind = BsnNodeKind::Relation {
             target_symbol: BsnPath::from_segments(["Children"]),
@@ -1374,6 +1459,7 @@ mod tests {
                 base_span: None,
                 patches: Vec::new(),
                 relations,
+                descendant_patches: Vec::new(),
             }));
         }
         document.push_root(child.unwrap());
@@ -1406,6 +1492,7 @@ mod tests {
                     base_span: None,
                     patches: Vec::new(),
                     relations: Vec::new(),
+                    descendant_patches: Vec::new(),
                 })
             })
             .collect();
@@ -1420,6 +1507,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: vec![relation],
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_ok());

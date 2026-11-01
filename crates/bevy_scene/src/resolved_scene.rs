@@ -5,6 +5,7 @@ use bevy_ecs::{
     component::{Component, ComponentsRegistrator},
     entity::Entity,
     error::{BevyError, Result},
+    name::Name,
     reflect::ReflectRelationshipTarget,
     relationship::{Relationship, RelationshipTarget},
     template::{
@@ -14,6 +15,7 @@ use bevy_ecs::{
 };
 use bevy_platform::collections::HashSet;
 use bevy_reflect::{PartialReflect, ReflectFromPtr, ReflectFromReflect, TypeRegistry};
+use alloc::{borrow::Cow, rc::Rc};
 use bevy_utils::{TypeIdHashMap, TypeIdIndexMap};
 use core::any::{Any, TypeId};
 use thiserror::Error;
@@ -253,6 +255,24 @@ pub struct ResolvedScene {
     /// A list of all [`SceneEntityReference`] values associated with this entity. There can be more than one if this scene uses
     /// "flattened" caching.
     pub entity_references: Vec<SceneEntityReference>,
+    /// The patches this scene makes to descendants of its cached scene, which apply when the
+    /// cached scene's related entities are spawned.
+    descendant_patches: Vec<DescendantPatch>,
+}
+
+/// A patch an inheriting [`ResolvedScene`] makes to one of the entities its cached scene spawns
+/// below the root, found by [`Name`] (a `.bsn` file's `patch #Name { … }`).
+///
+/// Its templates are applied to that entity in place of the entity's own templates of the same
+/// types, in the same bundle write, so they were seeded from those (copy-on-write) when the patch
+/// was resolved: see [`InheritedEntity::template`]. Its own descendant patches apply below that
+/// entity only. Its related scenes and cached scene are never applied.
+#[derive(Debug)]
+pub struct DescendantPatch {
+    /// The name of the entity this patches.
+    pub name: Name,
+    /// The templates applied to it, and the patches for entities below it.
+    pub scene: ResolvedScene,
 }
 
 impl core::fmt::Debug for ResolvedScene {
@@ -262,6 +282,7 @@ impl core::fmt::Debug for ResolvedScene {
             .field("template_types", &self.template_indices.keys())
             .field("related", &self.related)
             .field("entity_references", &self.entity_references)
+            .field("descendant_patches", &self.descendant_patches)
             .finish()
     }
 }
@@ -279,7 +300,7 @@ impl ResolvedScene {
         bundle_scratch: &mut BundleScratch,
         recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
-        self.apply_with(context, bundle_scratch, |_, _| {}, recorder)
+        self.apply_with(context, bundle_scratch, &[], |_, _| {}, recorder)
     }
 
     /// Applies this scene to the given [`TemplateContext`] (which holds an already-spawned [`EntityWorldMut`]).
@@ -297,6 +318,7 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
+        active: &[&DescendantPatch],
         writer_ops: impl FnOnce(&mut TemplateContext, &mut BundleWriter),
         mut recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
@@ -306,24 +328,41 @@ impl ResolvedScene {
                 .entity_references
                 .set(entity_reference, context.entity.id());
         }
-        if let Some(cached) = &self.cached {
-            let scene_patches = context.resource::<Assets<ScenePatch>>();
-            let Some(patch) = scene_patches.get(&cached.handle) else {
-                return Err(ApplySceneError::MissingCachedScene {
-                    path: cached.handle.path().cloned(),
-                    id: cached.handle.id(),
-                });
-            };
-            let Some(resolved_cached) = &patch.resolved else {
-                return Err(ApplySceneError::UnresolvedCachedScene {
-                    path: cached.handle.path().cloned(),
-                    id: cached.handle.id(),
-                });
-            };
-            let resolved_cached = resolved_cached.clone();
-            // SAFETY: bundle_writer is used with the same World across all template.apply calls,
-            // and the next bundle_writer.write call
-            unsafe {
+        let resolved_cached = match &self.cached {
+            Some(cached) => {
+                let scene_patches = context.resource::<Assets<ScenePatch>>();
+                let Some(patch) = scene_patches.get(&cached.handle) else {
+                    return Err(ApplySceneError::MissingCachedScene {
+                        path: cached.handle.path().cloned(),
+                        id: cached.handle.id(),
+                    });
+                };
+                let Some(resolved_cached) = &patch.resolved else {
+                    return Err(ApplySceneError::UnresolvedCachedScene {
+                        path: cached.handle.path().cloned(),
+                        id: cached.handle.id(),
+                    });
+                };
+                Some((cached, resolved_cached.clone()))
+            }
+            None => None,
+        };
+        let cached_scene = resolved_cached.as_ref().map(|(_, root)| &root.scene);
+
+        // The descendant patches in effect here that name this entity, outermost first.
+        let matched: Vec<&DescendantPatch> = match (active, self.name(cached_scene)) {
+            ([], _) | (_, None) => Vec::new(),
+            (active, Some(name)) => active
+                .iter()
+                .copied()
+                .filter(|patch| patch.name == *name)
+                .collect(),
+        };
+
+        // SAFETY: bundle_writer is used with the same World across all template.apply calls,
+        // and the next bundle_writer.write call
+        unsafe {
+            if let Some((cached, resolved_cached)) = &resolved_cached {
                 resolved_cached
                     .scene
                     .apply_templates_without_bundle_write(
@@ -336,58 +375,67 @@ impl ResolvedScene {
                         // resolved while its base was still unresolved — its local templates
                         // were created without base knowledge, and applying the base's copy
                         // too would push the same component twice into one bundle write.
-                        &self.template_indices,
+                        (&self.template_indices, PatchedTypes(&matched)),
                     )
                     .map_err(|e| ApplySceneError::CachedSceneApplyError {
                         cached: cached.handle.path().cloned(),
                         error: Box::new(e),
                     })?;
-                self.apply_templates_without_bundle_write(context, &mut bundle_writer, ())?;
-                // SAFETY: World is only used for component registration, which does not affect
-                // the entity location
-                let components = &mut context.entity.world_mut().components_registrator();
-                // This inserts empty RelationshipTarget collections to avoid archetype moves when then related entities are spawned
-                // It pre-allocates space in the collection to avoid reallocs as related entities are added.
-                for related in self.related.values() {
-                    (related.insert_relationship_target)(
-                        &mut bundle_writer,
-                        components,
-                        related.scenes.len(),
-                    );
-                }
+            }
+            // Descendant patches were seeded from this entity's templates, so theirs replace
+            // them; a type two of them set is written once, by the outermost.
+            self.apply_templates_without_bundle_write(
+                context,
+                &mut bundle_writer,
+                PatchedTypes(&matched),
+            )?;
+            for (index, patch) in matched.iter().enumerate() {
+                patch.scene.apply_templates_without_bundle_write(
+                    context,
+                    &mut bundle_writer,
+                    PatchedTypes(&matched[..index]),
+                )?;
+            }
+            // SAFETY: World is only used for component registration, which does not affect
+            // the entity location
+            let components = &mut context.entity.world_mut().components_registrator();
+            // This inserts empty RelationshipTarget collections to avoid archetype moves when then related entities are spawned
+            // It pre-allocates space in the collection to avoid reallocs as related entities are added.
+            for related in self.related.values() {
+                (related.insert_relationship_target)(
+                    &mut bundle_writer,
+                    components,
+                    related.scenes.len(),
+                );
+            }
 
-                (writer_ops)(context, &mut bundle_writer);
+            (writer_ops)(context, &mut bundle_writer);
 
-                bundle_writer.write(context.entity);
+            bundle_writer.write(context.entity);
 
+            let below = descendant_patches_below(active, &matched);
+            if let Some((_, resolved_cached)) = &resolved_cached {
+                // This scene's own descendant patches reach only what its cached scene spawns.
+                let inherited = if self.descendant_patches.is_empty() {
+                    Cow::Borrowed(&*below)
+                } else {
+                    Cow::Owned(
+                        below
+                            .iter()
+                            .copied()
+                            .chain(&self.descendant_patches)
+                            .collect(),
+                    )
+                };
                 resolved_cached.scene.apply_related(
                     context,
                     bundle_scratch,
+                    &inherited,
                     recorder.as_deref_mut(),
                 )?;
-                self.apply_related(context, bundle_scratch, recorder)?;
             }
-        } else {
-            // SAFETY: bundle_writer was used with the same World across all cases in this function,
-            unsafe {
-                self.apply_templates_without_bundle_write(context, &mut bundle_writer, ())?;
-                // SAFETY: World is only used for component registration, which does not affect
-                // the entity location
-                let components = &mut context.entity.world_mut().components_registrator();
-                // This inserts empty RelationshipTarget collections to avoid archetype moves when then related entities are spawned
-                // It pre-allocates space in the collection to avoid reallocs as related entities are added.
-                for related in self.related.values() {
-                    (related.insert_relationship_target)(
-                        &mut bundle_writer,
-                        components,
-                        related.scenes.len(),
-                    );
-                }
-                (writer_ops)(context, &mut bundle_writer);
-                bundle_writer.write(context.entity);
-                self.apply_related(context, bundle_scratch, recorder)?;
-            }
-        };
+            self.apply_related(context, bundle_scratch, &below, recorder)?;
+        }
 
         let entity = context.entity.id();
         context.entity.world_scope(|world| {
@@ -432,6 +480,7 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
+        active: &[&DescendantPatch],
         mut recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
         for related_resolved_scenes in self.related.values() {
@@ -462,6 +511,7 @@ impl ResolvedScene {
                         .apply_with(
                             &mut TemplateContext::new(&mut entity, entity_references),
                             bundle_scratch,
+                            active,
                             |context, bundle_writer| {
                                 // SAFETY: `context` is used to write all previous `bundle_writer` components
                                 // and is also used to write this relationship component
@@ -689,6 +739,32 @@ impl ResolvedScene {
                     data.relationship_name,
                 )
             })
+    }
+
+    /// Adds a patch to one of the entities this scene's cached scene spawns below the root. See
+    /// [`DescendantPatch`].
+    pub fn push_descendant_patch(&mut self, patch: DescendantPatch) {
+        self.descendant_patches.push(patch);
+    }
+
+    /// The patches this scene makes to its cached scene's descendants. See [`DescendantPatch`].
+    pub fn descendant_patches(&self) -> &[DescendantPatch] {
+        &self.descendant_patches
+    }
+
+    /// The resolved scene of this scene's cached scene, if it has one and it is resolved.
+    pub fn cached_scene<'a>(&self, patches: &'a Assets<ScenePatch>) -> Option<&'a ResolvedScene> {
+        let cached = self.cached.as_ref()?;
+        Some(&patches.get(&cached.handle)?.resolved.as_ref()?.scene)
+    }
+
+    /// The [`Name`] this scene gives its entity: its own, else `cached`'s (its cached scene's).
+    fn name<'a>(&'a self, cached: Option<&'a ResolvedScene>) -> Option<&'a Name> {
+        [self]
+            .into_iter()
+            .chain(cached)
+            .find_map(|scene| scene.get_direct_erased_template(TypeId::of::<Name>()))
+            .and_then(template_name)
     }
 
     /// Configures this [`ResolvedScene`] to include the given [`ScenePatch`] cached.
@@ -1082,6 +1158,158 @@ impl SkipTemplate for () {
     #[inline]
     fn should_skip(&self, _type_id: TypeId) -> bool {
         false
+    }
+}
+
+impl<A: SkipTemplate, B: SkipTemplate> SkipTemplate for (A, B) {
+    #[inline]
+    fn should_skip(&self, type_id: TypeId) -> bool {
+        self.0.should_skip(type_id) || self.1.should_skip(type_id)
+    }
+}
+
+/// Skips the template types any of these descendant patches sets.
+struct PatchedTypes<'a, 'b>(&'a [&'b DescendantPatch]);
+
+impl SkipTemplate for PatchedTypes<'_, '_> {
+    #[inline]
+    fn should_skip(&self, type_id: TypeId) -> bool {
+        self.0
+            .iter()
+            .any(|patch| patch.scene.template_indices.contains_key(&type_id))
+    }
+}
+
+/// The descendant patches in effect below an entity: those in effect at it, then the nested
+/// patches of those that matched it.
+fn descendant_patches_below<'s, 'a>(
+    active: &'s [&'a DescendantPatch],
+    matched: &[&'a DescendantPatch],
+) -> Cow<'s, [&'a DescendantPatch]> {
+    if matched
+        .iter()
+        .all(|patch| patch.scene.descendant_patches.is_empty())
+    {
+        return Cow::Borrowed(active);
+    }
+    Cow::Owned(
+        active
+            .iter()
+            .copied()
+            .chain(
+                matched
+                    .iter()
+                    .flat_map(|patch| &patch.scene.descendant_patches),
+            )
+            .collect(),
+    )
+}
+
+/// The [`Name`] a template builds, whether it is a statically-typed `Name` or a reflected one.
+fn template_name(template: &dyn ErasedTemplate) -> Option<&Name> {
+    let any: &dyn Any = template;
+    any.downcast_ref::<Name>()
+        .or_else(|| template.try_as_partial_reflect()?.try_downcast_ref::<Name>())
+}
+
+/// An entity that applying a [`ResolvedScene`] spawns, seen at resolve time through the scenes it
+/// inherits and the descendant patches in effect where it is spawned: what a [`DescendantPatch`]
+/// is found and seeded from.
+#[derive(Clone)]
+pub struct InheritedEntity<'a> {
+    scene: &'a ResolvedScene,
+    cached: Option<&'a ResolvedScene>,
+    patches: &'a Assets<ScenePatch>,
+    /// The descendant patches in effect where this entity is spawned, outermost first; shared
+    /// with its siblings.
+    active: Rc<[&'a DescendantPatch]>,
+    /// Those of `active` that name this entity.
+    matched: Vec<&'a DescendantPatch>,
+}
+
+impl<'a> InheritedEntity<'a> {
+    /// The entity that applying `scene` spawns, with no descendant patches in effect above it.
+    pub fn root(scene: &'a ResolvedScene, patches: &'a Assets<ScenePatch>) -> Self {
+        Self::new(scene, patches, Rc::from([]))
+    }
+
+    fn new(
+        scene: &'a ResolvedScene,
+        patches: &'a Assets<ScenePatch>,
+        active: Rc<[&'a DescendantPatch]>,
+    ) -> Self {
+        let cached = scene.cached_scene(patches);
+        let matched = match scene.name(cached) {
+            Some(name) if !active.is_empty() => active
+                .iter()
+                .copied()
+                .filter(|patch| patch.name == *name)
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            scene,
+            cached,
+            patches,
+            active,
+            matched,
+        }
+    }
+
+    /// The entity's [`Name`], if it has one.
+    pub fn name(&self) -> Option<&'a Name> {
+        self.scene.name(self.cached)
+    }
+
+    /// The path of the entity's cached scene when it has one that is not resolved yet: then what
+    /// it spawns, and the name it gives, are unknown.
+    pub fn unresolved_base(&self) -> Option<Option<&'a AssetPath<'static>>> {
+        let cached = self.scene.cached.as_ref()?;
+        self.cached.is_none().then(|| cached.handle.path())
+    }
+
+    /// The template the entity's `type_id` template slot is built from, as it is applied: the
+    /// outermost matching descendant patch's, else the entity's own scene's, else its cached
+    /// scene's.
+    pub fn template(&self, type_id: TypeId) -> Option<&'a dyn ErasedTemplate> {
+        self.matched
+            .iter()
+            .map(|patch| &patch.scene)
+            .chain([self.scene])
+            .chain(self.cached)
+            .find_map(|scene| scene.get_direct_erased_template(type_id))
+    }
+
+    /// Calls `visit` with every entity spawned below this one, in the order they are spawned.
+    pub fn visit_descendants(&self, visit: &mut impl FnMut(&InheritedEntity<'a>)) {
+        // Mirrors `ResolvedScene::apply_with`: the cached scene's related entities first, with
+        // this scene's own descendant patches in effect, then this scene's.
+        let below: Rc<[&'a DescendantPatch]> = match descendant_patches_below(&self.active, &self.matched) {
+            Cow::Borrowed(_) => self.active.clone(),
+            Cow::Owned(below) => below.into(),
+        };
+        let mut visit_related = |scenes: &'a ResolvedScene, active: &Rc<[&'a DescendantPatch]>| {
+            for related in scenes.related.values() {
+                for scene in &related.scenes {
+                    let entity = InheritedEntity::new(scene, self.patches, active.clone());
+                    visit(&entity);
+                    entity.visit_descendants(visit);
+                }
+            }
+        };
+        if let Some(cached) = self.cached {
+            let inherited = if self.scene.descendant_patches.is_empty() {
+                below.clone()
+            } else {
+                below
+                    .iter()
+                    .copied()
+                    .chain(&self.scene.descendant_patches)
+                    .collect()
+            };
+            visit_related(cached, &inherited);
+        }
+        visit_related(self.scene, &below);
     }
 }
 

@@ -72,11 +72,19 @@ impl Lower<'_> {
             base,
             patches,
             relations,
+            descendant_patches,
             ..
         } = &node.kind
         else {
             unreachable!("roots and relation items are entities");
         };
+        if let Some(first) = descendant_patches.first() {
+            let span = doc.node(*first).map_or(node.span, |node| node.span);
+            return Err(self.error(
+                span,
+                "`patch #Name { … }` blocks are not supported in a document yet",
+            ));
+        }
         let mut out = Vec::new();
         if let Some(base) = base {
             out.push(self.ast.world.spawn(BsnPatch::Base(base.clone())).id());
@@ -152,7 +160,9 @@ impl Lower<'_> {
                     _ => unreachable!("a patch value is a path, struct or named tuple"),
                 }
             }
-            BsnNodeKind::Entity { .. } => unreachable!("entity entries are patches or relations"),
+            BsnNodeKind::Entity { .. } | BsnNodeKind::DescendantPatch { .. } => {
+                unreachable!("entity entries are patches or relations")
+            }
         }
     }
 

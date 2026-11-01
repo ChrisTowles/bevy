@@ -874,6 +874,35 @@
 //! the file that names them. Each `.bsn` file describes exactly one root entity and cannot
 //! inherit from itself; labeled sub-assets (`file.bsn#Label`) are not supported yet.
 //!
+//! ### Patching inherited descendants
+//!
+//! An entity inheriting `:"base.bsn"` patches the base's root, and its own `Children [ ... ]` add
+//! entities after the base's. To change an entity the base spawns *below* its root (hide a room's
+//! window pane, swap a door's material), a `.bsn` file names it in a `patch` block:
+//!
+//! ```text
+//! :"rooms/tavern.bsn"
+//! patch #"Tavern_WallDTransl.Trim" {
+//!     bevy_camera::visibility::Visibility::Hidden
+//! }
+//! patch #Candle {
+//!     patch #"flame light" {
+//!         my_game::Flame { intensity: 0.0 }
+//!     }
+//! }
+//! ```
+//!
+//! A block patches the one descendant whose [`Name`] it names (`#Name` or a `Name("...")`
+//! component), at any depth, including below base children with bases of their own. Its patches
+//! are partial and land on the descendant's own values, field by field, in the same insert that
+//! spawns it. A nested block looks only below the descendant its parent matched, which is how a
+//! name the base repeats is told apart. A name that matches no descendant, or more than one, fails
+//! the resolve with an error naming the file, the base and the names. A block holds component
+//! patches and nested blocks only: no `#Name` (it may not rename what it finds) and no relations.
+//! The patched descendant records what it was patched with in [`PatchedComponents`], and a writer
+//! saving the inheriting entity writes those values back as `patch` blocks where they still
+//! differ from the base. See [`DescendantPatch`].
+//!
 //! Loading is provided by the `bevy_bsn_asset` crate's `DynamicBsnLoader`, registered by its
 //! `BsnAssetPlugin` (included in `DefaultPlugins` when the `bsn_asset` cargo feature is enabled;
 //! it is on by default and included in the `scene` feature collection). Parse and resolution

@@ -128,6 +128,7 @@ fn lower_entity(
         base_span: None,
         patches: patch_nodes,
         relations,
+        descendant_patches: Vec::new(),
     }))
 }
 

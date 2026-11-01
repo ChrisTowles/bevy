@@ -54,6 +54,8 @@ pub use write::{
 #[cfg(test)]
 mod attack;
 #[cfg(test)]
+mod descendant_patch_tests;
+#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;

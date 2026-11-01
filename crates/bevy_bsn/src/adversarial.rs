@@ -52,6 +52,7 @@ fn wrap_id(mut document: BsnDocument, inner: BsnValueId) -> BsnDocument {
         base_span: None,
         patches: vec![patch],
         relations: vec![],
+        descendant_patches: Vec::new(),
     });
     document.push_root(entity);
     document
@@ -706,15 +707,21 @@ fn preorder_nodes(document: &BsnDocument) -> Vec<u32> {
         out.push(id.0);
         match &node.kind {
             BsnNodeKind::Entity {
-                patches, relations, ..
+                patches,
+                relations,
+                descendant_patches,
+                ..
             } => {
-                let mut entries: Vec<crate::BsnNodeId> =
-                    patches.iter().chain(relations).copied().collect();
-                entries.sort_by_key(|id| {
-                    let start = document.node(*id).map_or(0, |node| node.span.start);
-                    (start, id.0)
-                });
-                for entry in entries {
+                for entry in crate::ast::merge_entries(document, &[patches, relations, descendant_patches]) {
+                    walk(document, entry, out);
+                }
+            }
+            BsnNodeKind::DescendantPatch {
+                patches,
+                descendant_patches,
+                ..
+            } => {
+                for entry in crate::ast::merge_entries(document, &[patches, descendant_patches]) {
                     walk(document, entry, out);
                 }
             }

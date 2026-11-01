@@ -55,6 +55,7 @@ struct EntityBuilder {
     base_span: Option<Span>,
     patches: Vec<BsnNodeId>,
     relations: Vec<BsnNodeId>,
+    descendant_patches: Vec<BsnNodeId>,
 }
 
 struct Parser<'src> {
@@ -331,6 +332,14 @@ impl<'src> Parser<'src> {
             let token = self.peek_token();
             return Err(self.unexpected(token, &["type path", "`#`", "`~`", "`@`", "`:`"]));
         }
+        if builder.base.is_none()
+            && let Some(&first) = builder.descendant_patches.first()
+        {
+            let span = self.nodes[first.0 as usize]
+                .as_ref()
+                .map_or(Span::NONE, |node| node.span);
+            return Err(BsnParseError::new(span, BsnParseErrorKind::PatchWithoutBase));
+        }
         let span = Span::new(start, self.prev_end());
         self.finish_node(
             id,
@@ -342,6 +351,61 @@ impl<'src> Parser<'src> {
                 base_span: builder.base_span,
                 patches: builder.patches,
                 relations: builder.relations,
+                descendant_patches: builder.descendant_patches,
+            },
+        );
+        Ok(id)
+    }
+
+    /// `descendant_patch = "patch" "#" name "{" { patch_entry | descendant_patch } "}"`
+    fn parse_descendant_patch(&mut self) -> Result<BsnNodeId, BsnParseError> {
+        self.nested(Self::parse_descendant_patch_inner)
+    }
+
+    fn parse_descendant_patch_inner(&mut self) -> Result<BsnNodeId, BsnParseError> {
+        let id = self.alloc_node();
+        let keyword = self.bump();
+        self.expect(TokenKind::Hash, &["`#`"])?;
+        let (name, name_span) = self.parse_name()?;
+        self.expect(TokenKind::LBrace, &["`{`"])?;
+        let mut builder = EntityBuilder::default();
+        loop {
+            self.check_error_token()?;
+            let token = self.peek_token();
+            let refused = match token.kind {
+                TokenKind::RBrace => break,
+                TokenKind::Eof => return Err(self.unexpected(token, &["`}`"])),
+                TokenKind::Hash => Some("a `#Name` (the block's own `#Name` picks the descendant)"),
+                TokenKind::Colon => Some("a `:\"…\"` include"),
+                _ => None,
+            };
+            if let Some(refused) = refused {
+                return Err(BsnParseError::new(
+                    token.span,
+                    BsnParseErrorKind::PatchBlockEntry(refused),
+                ));
+            }
+            self.parse_entry(&mut builder)?;
+            if let Some(&relation) = builder.relations.first() {
+                let span = self.nodes[relation.0 as usize]
+                    .as_ref()
+                    .map_or(token.span, |node| node.span);
+                return Err(BsnParseError::new(
+                    span,
+                    BsnParseErrorKind::PatchBlockEntry("relations"),
+                ));
+            }
+        }
+        self.expect(TokenKind::RBrace, &["`}`"])?;
+        let span = Span::new(keyword.span.start, self.prev_end());
+        self.finish_node(
+            id,
+            span,
+            BsnNodeKind::DescendantPatch {
+                name,
+                name_span,
+                patches: builder.patches,
+                descendant_patches: builder.descendant_patches,
             },
         );
         Ok(id)
@@ -372,7 +436,7 @@ impl<'src> Parser<'src> {
         Ok(())
     }
 
-    /// `entry = name_entry | relation_entry | patch_entry`
+    /// `entry = name_entry | relation_entry | patch_entry | descendant_patch`
     fn parse_entry(&mut self, builder: &mut EntityBuilder) -> Result<(), BsnParseError> {
         self.check_error_token()?;
         let token = self.peek_token();
@@ -411,6 +475,11 @@ impl<'src> Parser<'src> {
                 }
                 if text == "on" && self.peek_at(1) == TokenKind::LParen {
                     return Err(self.unsupported(unsupported::OBSERVER, token.span));
+                }
+                if text == "patch" && self.peek_at(1) == TokenKind::Hash {
+                    let id = self.parse_descendant_patch()?;
+                    builder.descendant_patches.push(id);
+                    return Ok(());
                 }
                 self.parse_patch(builder, BsnPatchPrefix::FromTemplate, token.span)
             }
@@ -814,7 +883,11 @@ fn first_duplicate_field(fields: &[(String, BsnValueId)]) -> Option<usize> {
 fn is_entity_stop(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Eof | TokenKind::RBracket | TokenKind::DashDash | TokenKind::Comma
+        TokenKind::Eof
+            | TokenKind::RBracket
+            | TokenKind::RBrace
+            | TokenKind::DashDash
+            | TokenKind::Comma
     )
 }
 

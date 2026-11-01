@@ -659,9 +659,12 @@ fn parse_spans_cover_source() {
         for node in &document.nodes {
             match &node.kind {
                 BsnNodeKind::Entity {
-                    patches, relations, ..
+                    patches,
+                    relations,
+                    descendant_patches,
+                    ..
                 } => {
-                    for child in patches.iter().chain(relations) {
+                    for child in patches.iter().chain(relations).chain(descendant_patches) {
                         let child = document.node(*child).unwrap();
                         assert!(
                             node.span.start <= child.span.start && child.span.end <= node.span.end,
@@ -671,8 +674,14 @@ fn parse_spans_cover_source() {
                         );
                     }
                 }
-                BsnNodeKind::Relation { entities, .. } => {
-                    for child in entities {
+                BsnNodeKind::Relation {
+                    entities: children, ..
+                }
+                | BsnNodeKind::DescendantPatch {
+                    descendant_patches: children,
+                    ..
+                } => {
+                    for child in children {
                         let child = document.node(*child).unwrap();
                         assert!(
                             node.span.start <= child.span.start && child.span.end <= node.span.end,
@@ -821,6 +830,7 @@ fn entity(patches: Vec<BsnNodeId>, relations: Vec<BsnNodeId>) -> BsnNodeKind {
         base_span: None,
         patches,
         relations,
+        descendant_patches: Vec::new(),
     }
 }
 
@@ -978,6 +988,7 @@ fn print_builder_document() {
         base_span: None,
         patches: vec![transform, marker],
         relations: vec![relation],
+        descendant_patches: Vec::new(),
     });
     document.push_root(root);
 
@@ -1035,6 +1046,7 @@ fn print_entry_order_from_ids() {
         base_span: None,
         patches: vec![a, c],
         relations: vec![relation],
+        descendant_patches: Vec::new(),
     });
     document.push_root(root);
     assert_eq!(
@@ -1770,10 +1782,22 @@ fn mutate(document: &mut BsnDocument, rng: &mut Rng) {
             if let Some(node) = document.nodes.get_mut(index) {
                 match &mut node.kind {
                     BsnNodeKind::Entity {
-                        patches, relations, ..
+                        patches,
+                        relations,
+                        descendant_patches,
+                        ..
                     } => {
                         patches.clear();
                         relations.clear();
+                        descendant_patches.clear();
+                    }
+                    BsnNodeKind::DescendantPatch {
+                        patches,
+                        descendant_patches,
+                        ..
+                    } => {
+                        patches.clear();
+                        descendant_patches.clear();
                     }
                     BsnNodeKind::Relation { entities, .. } => entities.clear(),
                     BsnNodeKind::Patch { .. } => {}
@@ -2041,4 +2065,113 @@ fn unexpected_token_names_the_token() {
     assert_eq!(error.to_string(), "unexpected number");
     let error = parse("A { x: ! }").unwrap_err();
     assert!(!error.to_string().trim_end().ends_with("unexpected"));
+}
+
+// ---------------------------------------------------------------------------------------
+// `patch #Name { … }`: patching an inherited descendant
+// ---------------------------------------------------------------------------------------
+
+const DESCENDANT_PATCH: &str = r#":"rooms/tavern.bsn"
+#Hall
+a::Transform { x: 1.0 }
+patch #"Tavern_WallDTransl.Trim" {
+    a::Visibility::Hidden
+}
+patch #Candle {
+    patch #"flame light" {
+        a::Light { intensity: 0.0 }
+    }
+}
+"#;
+
+#[test]
+fn descendant_patch_parses_into_its_own_node() {
+    let document = parse(DESCENDANT_PATCH).unwrap();
+    let root = document.node(document.roots[0]).unwrap();
+    let BsnNodeKind::Entity {
+        patches,
+        descendant_patches,
+        ..
+    } = &root.kind
+    else {
+        panic!("root is not an entity");
+    };
+    assert_eq!(patches.len(), 1);
+    assert_eq!(descendant_patches.len(), 2);
+
+    let BsnNodeKind::DescendantPatch {
+        name,
+        patches,
+        descendant_patches: nested,
+        ..
+    } = &document.node(descendant_patches[0]).unwrap().kind
+    else {
+        panic!("not a descendant patch");
+    };
+    assert_eq!(name, "Tavern_WallDTransl.Trim");
+    assert_eq!(patches.len(), 1);
+    assert!(nested.is_empty());
+
+    let BsnNodeKind::DescendantPatch {
+        name,
+        patches,
+        descendant_patches: nested,
+        ..
+    } = &document.node(descendant_patches[1]).unwrap().kind
+    else {
+        panic!("not a descendant patch");
+    };
+    assert_eq!(name, "Candle");
+    assert!(patches.is_empty());
+    assert_eq!(nested.len(), 1);
+}
+
+#[test]
+fn descendant_patch_prints_canonically_and_round_trips() {
+    let document = parse(DESCENDANT_PATCH).unwrap();
+    let text = print_document(&document);
+    assert_eq!(text, DESCENDANT_PATCH);
+    assert!(parse(&text).unwrap().structural_eq(&document));
+}
+
+#[test]
+fn descendant_patch_differs_structurally_by_name() {
+    let a = parse(":\"b.bsn\" patch #A { X }").unwrap();
+    let b = parse(":\"b.bsn\" patch #B { X }").unwrap();
+    assert!(!a.structural_eq(&b));
+}
+
+#[test]
+fn empty_descendant_patch_prints_on_one_line() {
+    let document = parse(":\"b.bsn\" patch #A {}").unwrap();
+    assert_eq!(print_document(&document), ":\"b.bsn\"\npatch #A {}\n");
+}
+
+#[test]
+fn reject_descendant_patch_without_base() {
+    let error = err("A patch #B { X }");
+    assert!(matches!(error.kind, BsnParseErrorKind::PatchWithoutBase));
+}
+
+#[test]
+fn reject_name_relation_and_base_inside_descendant_patch() {
+    for source in [
+        ":\"b.bsn\" patch #A { #B }",
+        ":\"b.bsn\" patch #A { :\"c.bsn\" }",
+        ":\"b.bsn\" patch #A { Children [ X ] }",
+    ] {
+        let error = err(source);
+        assert!(
+            matches!(error.kind, BsnParseErrorKind::PatchBlockEntry(_)),
+            "{source}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn reject_unclosed_descendant_patch() {
+    assert!(matches!(
+        err(":\"b.bsn\" patch #A { X").kind,
+        BsnParseErrorKind::UnexpectedEof
+    ));
 }

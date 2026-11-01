@@ -202,6 +202,13 @@ pub enum BsnParseErrorKind {
     /// An entity carries more than one `#Name`.
     #[error("duplicate entity name; an entity may have at most one `#Name`")]
     DuplicateName,
+    /// A `patch #Name { … }` block holds something other than patches and nested `patch` blocks.
+    /// The payload names what it held.
+    #[error("a `patch #Name {{ … }}` block holds only component patches and nested `patch` blocks, not {0}")]
+    PatchBlockEntry(&'static str),
+    /// A `patch #Name { … }` block on an entity with no `:"…"` base to patch.
+    #[error("`patch #Name {{ … }}` patches a descendant inherited from a `:\"base.bsn\"`, and this entity has no base")]
+    PatchWithoutBase,
     /// A struct body sets the same field twice.
     #[error("duplicate field `{0}`")]
     DuplicateField(String),

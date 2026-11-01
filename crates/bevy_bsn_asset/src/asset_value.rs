@@ -130,6 +130,7 @@ pub fn write_asset_value_with(
         base_span: None,
         patches: Vec::from([patch]),
         relations: Vec::new(),
+        descendant_patches: Vec::new(),
     });
     document.push_root(root);
     Ok(document)
