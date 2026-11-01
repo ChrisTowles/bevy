@@ -338,7 +338,10 @@ impl<'src> Parser<'src> {
             let span = self.nodes[first.0 as usize]
                 .as_ref()
                 .map_or(Span::NONE, |node| node.span);
-            return Err(BsnParseError::new(span, BsnParseErrorKind::PatchWithoutBase));
+            return Err(BsnParseError::new(
+                span,
+                BsnParseErrorKind::PatchWithoutBase,
+            ));
         }
         let span = Span::new(start, self.prev_end());
         self.finish_node(
@@ -454,7 +457,10 @@ impl<'src> Parser<'src> {
                 self.bump();
                 let (name, name_span) = self.parse_name()?;
                 if builder.name.is_some() {
-                    return Err(BsnParseError::new(name_span, BsnParseErrorKind::DuplicateName));
+                    return Err(BsnParseError::new(
+                        name_span,
+                        BsnParseErrorKind::DuplicateName,
+                    ));
                 }
                 builder.name = Some(name);
                 builder.name_span = Some(token.span.join(name_span));
@@ -894,7 +900,8 @@ fn is_entity_stop(kind: TokenKind) -> bool {
 /// The `bsn!` macro's constant heuristic: at least two characters and no lowercase letter.
 fn is_const_ident(ident: &str) -> bool {
     // `PI`, `MAX`, `MY_CONST`; not `F32` or `U8`, which are enum variants (one letter, then digits).
-    ident.chars().filter(|c| c.is_alphabetic()).count() > 1 && !ident.chars().any(char::is_lowercase)
+    ident.chars().filter(|c| c.is_alphabetic()).count() > 1
+        && !ident.chars().any(char::is_lowercase)
 }
 
 /// A human-readable description of a token, used in "unexpected …" messages.

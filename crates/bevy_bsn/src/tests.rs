@@ -1102,7 +1102,10 @@ fn one_field_per_line_breaks_structs_but_not_tuple_structs() {
         },
     )
     .unwrap();
-    assert_eq!(out, "A {\n    x: B {\n        y: 1,\n    },\n    z: Name(\"n\"),\n}\n");
+    assert_eq!(
+        out,
+        "A {\n    x: B {\n        y: 1,\n    },\n    z: Name(\"n\"),\n}\n"
+    );
 }
 
 #[test]
@@ -1867,7 +1870,10 @@ fn parse_edge_cases_table() {
 
     // Names that are not identifiers are quoted, on entities and in entity references.
     let quoted = parse("#\"Main Camera\"\nA(#\"Main Camera\")").unwrap();
-    assert_eq!(print_document(&quoted), "#\"Main Camera\"\nA(#\"Main Camera\")\n");
+    assert_eq!(
+        print_document(&quoted),
+        "#\"Main Camera\"\nA(#\"Main Camera\")\n"
+    );
 
     // Unpaired closing delimiters.
     assert!(matches!(

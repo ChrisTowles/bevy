@@ -199,7 +199,9 @@ fn resolve_entity(
     }
 
     // What this file sets, on top of what a base already recorded.
-    let authored = &mut scene.get_or_insert_template::<AuthoredComponents>(context).0;
+    let authored = &mut scene
+        .get_or_insert_template::<AuthoredComponents>(context)
+        .0;
     if entity.name.is_some() {
         authored.insert(TypeId::of::<Name>());
     }

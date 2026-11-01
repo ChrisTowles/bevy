@@ -209,7 +209,9 @@ pub enum ResolveSceneError {
         found: usize,
     },
     /// Caused when a scene patching its base's descendants resolves before its base has.
-    #[error("{scene}: its base \"{base}\" is not resolved, so its `patch` blocks have nothing to patch")]
+    #[error(
+        "{scene}: its base \"{base}\" is not resolved, so its `patch` blocks have nothing to patch"
+    )]
     DescendantPatchBaseUnresolved {
         /// The scene declaring the patches.
         scene: String,

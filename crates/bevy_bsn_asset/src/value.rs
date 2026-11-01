@@ -17,9 +17,9 @@ use bevy_ecs::{
 };
 use bevy_platform::collections::HashSet;
 use bevy_reflect::{
+    array::DynamicArray,
     convert::ReflectConvert,
     enums::{DynamicEnum, DynamicVariant, VariantInfo},
-    array::DynamicArray,
     list::DynamicList,
     map::{DynamicMap, Map},
     set::{DynamicSet, Set},
@@ -680,7 +680,6 @@ pub(crate) fn build_enum_forms(
 
     Ok((Box::new(full_enum), Box::new(partial_enum)))
 }
-
 
 /// Tuple values, such as `(1, 2)`.
 fn build_tuple(

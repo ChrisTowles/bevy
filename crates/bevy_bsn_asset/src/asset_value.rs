@@ -20,8 +20,8 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_reflect::{
-    std_traits::ReflectDefault, FromReflect, PartialReflect, Reflect, ReflectFromReflect,
-    TypePath, TypeRegistration, TypeRegistry, TypeRegistryArc,
+    std_traits::ReflectDefault, FromReflect, PartialReflect, Reflect, ReflectFromReflect, TypePath,
+    TypeRegistration, TypeRegistry, TypeRegistryArc,
 };
 use thiserror::Error;
 
@@ -185,14 +185,14 @@ impl<A: Asset + FromReflect> AssetLoader for BsnValueLoader<A> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let text = core::str::from_utf8(&bytes)?;
-        let document = BsnDocument::parse(text).map_err(|e| BsnValueLoaderError::Parse(format!("{e:?}")))?;
+        let document =
+            BsnDocument::parse(text).map_err(|e| BsnValueLoaderError::Parse(format!("{e:?}")))?;
         let source = load_context.path().to_string();
         let registry = self.registry.read();
         let registration = registry
             .get(core::any::TypeId::of::<A>())
             .ok_or_else(|| BsnAssetValueError::Missing(A::type_path().into()))?;
-        let mut handles =
-            |type_id, path| load_context.load_builder().load_erased(type_id, path);
+        let mut handles = |type_id, path| load_context.load_builder().load_erased(type_id, path);
         let (_, value) = asset_value_from_document(
             &document,
             &source,
