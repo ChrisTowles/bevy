@@ -185,6 +185,37 @@ pub enum ResolveSceneError {
         /// The template type path that could not be patched.
         type_path: String,
     },
+    /// Caused when a [`DescendantPatch`](crate::DescendantPatch) names no descendant of the base.
+    #[error("{scene}: `patch {path}` matches no descendant of its base \"{base}\"")]
+    DescendantNotFound {
+        /// The scene declaring the patch.
+        scene: String,
+        /// The base whose descendants were searched.
+        base: String,
+        /// The names leading to the descendant, outermost first: `#A > #B`.
+        path: String,
+    },
+    /// Caused when a [`DescendantPatch`](crate::DescendantPatch) names more than one descendant
+    /// of the base.
+    #[error("{scene}: `patch {path}` matches {found} descendants of its base \"{base}\"; nest it in a `patch` block naming an ancestor that tells them apart")]
+    DescendantAmbiguous {
+        /// The scene declaring the patch.
+        scene: String,
+        /// The base whose descendants were searched.
+        base: String,
+        /// The names leading to the descendant, outermost first: `#A > #B`.
+        path: String,
+        /// How many descendants carry the name.
+        found: usize,
+    },
+    /// Caused when a scene patching its base's descendants resolves before its base has.
+    #[error("{scene}: its base \"{base}\" is not resolved, so its `patch` blocks have nothing to patch")]
+    DescendantPatchBaseUnresolved {
+        /// The scene declaring the patches.
+        scene: String,
+        /// The unresolved base.
+        base: String,
+    },
 }
 
 /// Context used by [`Scene`] implementations during [`Scene::resolve`].

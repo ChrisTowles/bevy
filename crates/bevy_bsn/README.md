@@ -38,6 +38,23 @@ inherit from, any number of *patches* naming a type (`Transform { … }`, `Camer
 identifier is quoted: `#"Main Camera"`. Patches are partial — fields you do not mention keep the value they had
 from an earlier patch or from the type's default.
 
+An entity that inherits a base can also patch the base's own descendants instead of adding
+entities: `patch #Name { … }` holds the patches for the one descendant named `Name`, at any
+depth. A `patch` block nested in another looks only below the descendant its parent matched,
+which tells apart a name the base repeats:
+
+```text
+:"rooms/tavern.bsn"
+patch #"Tavern_WallDTransl.Trim" {
+    bevy_camera::visibility::Visibility::Hidden
+}
+patch #Candle {
+    patch #"flame light" {
+        my_game::Light { intensity: 0.0 }
+    }
+}
+```
+
 ## Reading
 
 ```rust
@@ -90,6 +107,7 @@ let root = document.push_node(BsnNodeKind::Entity {
     base_span: None,
     patches: vec![health],
     relations: vec![],
+    descendant_patches: Vec::new(),
 });
 document.push_root(root);
 

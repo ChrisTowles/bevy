@@ -145,6 +145,12 @@ pub struct SceneBase(pub String);
 #[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthoredComponents(pub bevy_platform::collections::HashSet<core::any::TypeId>);
 
+/// The components an inheriting scene's `patch #Name { … }` blocks set on this entity, which its
+/// base spawned (see [`DescendantPatch`](crate::DescendantPatch)). A writer saving the inheriting
+/// entity writes those of them that differ from a fresh copy of the base back as `patch` blocks.
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatchedComponents(pub bevy_platform::collections::HashSet<core::any::TypeId>);
+
 /// Records what the most recent application of a [`ScenePatch`] created on this entity, so that
 /// the scene can be re-applied when its source asset changes (hot reload).
 ///

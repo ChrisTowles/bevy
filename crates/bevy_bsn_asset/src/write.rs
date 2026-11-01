@@ -6,8 +6,10 @@
 //! * a component's fields only where they differ from the type's default (a component equal to
 //!   its default is written as its bare path, which still adds it);
 //! * an entity that inherits a `:"base.bsn"` (it carries [`SceneBase`]) as the include plus only
-//!   what differs from a fresh copy of the base. The base's own descendants are not written: they
-//!   belong to the base file, which is where they are edited;
+//!   what differs from a fresh copy of the base. The base's own descendants belong to the base
+//!   file, which is where they are edited; only what this file's `patch #Name { … }` blocks set
+//!   on them (recorded as [`PatchedComponents`]) and still differs from the fresh copy is written,
+//!   as `patch` blocks under names that find each descendant;
 //! * a handle as its asset path, or, for a handle with no path, the asset's value inline;
 //! * an [`Entity`] pointing inside the tree as `#name`;
 //! * `Name` as the entity's `#name`, and `Children` as its relation block.
@@ -38,7 +40,7 @@ use bevy_reflect::{
     enums::{Enum, VariantType}, serde::SerializationData, std_traits::ReflectDefault,
     structs::Struct, tuple_struct::TupleStruct, PartialReflect, ReflectRef, TypeRegistry,
 };
-use bevy_scene::{AuthoredComponents, SceneBase, ScenePatch};
+use bevy_scene::{AuthoredComponents, PatchedComponents, SceneBase, ScenePatch};
 use thiserror::Error;
 
 /// Components [`write_scene`] never writes, by type path: values the engine derives at runtime.
@@ -97,6 +99,9 @@ pub enum BsnWriteError {
     /// A `:"base.bsn"` that failed to spawn for comparison.
     #[error("base `{0}`: {1}")]
     BaseSpawn(String, String),
+    /// A patched descendant of a base that no chain of unique names finds.
+    #[error("a descendant of base `{0}` was patched, but no chain of unique names finds it")]
+    UnnamedDescendant(String),
 }
 
 /// Writes `root` and the entities below it as a `.bsn` document (see the module docs).
@@ -136,7 +141,7 @@ pub fn write_scene_roots_under(
     let writer = Writer::new(&registry, settings);
     let result = (|| {
         let patches = match holder {
-            Some(holder) => writer.patches(world, holder, None)?,
+            Some(holder) => writer.patches(world, holder, None, None)?,
             None => Vec::new(),
         };
         let mut children = Vec::new();
@@ -151,6 +156,7 @@ pub fn write_scene_roots_under(
             base: None,
             patches,
             children,
+            descendant_patches: Vec::new(),
         })
     })();
     bases.despawn(world);
@@ -211,6 +217,16 @@ struct Node {
     base: Option<String>,
     patches: Vec<(String, Body)>,
     children: Vec<Node>,
+    descendant_patches: Vec<PatchBlock>,
+}
+
+/// A `patch #Name { … }` block on its way to the document.
+struct PatchBlock {
+    /// The descendant it finds, in the fresh copy of the base.
+    entity: Entity,
+    name: String,
+    patches: Vec<(String, Body)>,
+    nested: Vec<PatchBlock>,
 }
 
 /// Fresh copies of bases, spawned disabled for comparison and despawned when done.
@@ -339,8 +355,12 @@ impl<'a> Writer<'a> {
             Some(path) => Some(bases.get(world, path)?),
             None => None,
         };
-        let patches = self.patches(world, entity, base_root)?;
+        let patches = self.patches(world, entity, base_root, None)?;
         let name = world.get::<Name>(entity).map(|n| n.as_str().to_string());
+        let descendant_patches = match (&base, base_root) {
+            (Some(base), Some(fresh)) => self.descendant_patches(world, entity, fresh, base)?,
+            _ => Vec::new(),
+        };
 
         // A base's own children come first; only those after them are this file's.
         let skip = base_root
@@ -363,21 +383,77 @@ impl<'a> Writer<'a> {
             base,
             patches,
             children,
+            descendant_patches,
         })
     }
 
-    /// The entity's component patches, sorted by type path for stable output.
+    /// The `patch` blocks of an entity inheriting `base`: each descendant the base spawned that
+    /// carries [`PatchedComponents`], written as what differs from its counterpart in `fresh`
+    /// (the fresh copy of the base), under the names that find it there.
+    fn descendant_patches(
+        &self,
+        world: &World,
+        entity: Entity,
+        fresh: Entity,
+        base: &str,
+    ) -> Result<Vec<PatchBlock>, BsnWriteError> {
+        // A base spawns the same tree every time, so a descendant's counterpart is the sibling of
+        // the same name, the n-th of a repeated name pairing with the n-th: a sibling despawned or
+        // reordered since does not shift the others. The entity's own children come after the
+        // base's and pair with what is left over, nothing of the same name.
+        let mut pairs = Vec::new();
+        let mut stack = vec![(entity, fresh)];
+        while let Some((live, copy)) = stack.pop() {
+            let live_children = world.get::<Children>(live).map(|c| &**c).unwrap_or(&[]);
+            let mut copy_children: Vec<Option<Entity>> = world
+                .get::<Children>(copy)
+                .map(|c| c.iter().copied().map(Some).collect())
+                .unwrap_or_default();
+            let name = |entity: Entity| world.get::<Name>(entity).map(Name::as_str);
+            let first = pairs.len();
+            for &live in live_children {
+                let wanted = name(live);
+                let Some(copy) = copy_children
+                    .iter_mut()
+                    .find(|copy| copy.is_some_and(|copy| name(copy) == wanted))
+                    .and_then(Option::take)
+                else {
+                    continue;
+                };
+                pairs.push((live, copy));
+            }
+            stack.extend(pairs[first..].iter().rev().copied());
+        }
+        let mut blocks = Vec::new();
+        for (live, copy) in pairs {
+            let Some(patched) = world.get::<PatchedComponents>(live) else {
+                continue;
+            };
+            let patches = self.patches(world, live, Some(copy), Some(&patched.0))?;
+            if patches.is_empty() {
+                continue;
+            }
+            let path = name_path(world, fresh, copy)
+                .ok_or_else(|| BsnWriteError::UnnamedDescendant(base.to_string()))?;
+            insert_block(world, &mut blocks, &path, patches);
+        }
+        Ok(blocks)
+    }
+
+    /// The entity's component patches, sorted by type path for stable output: those in `only`,
+    /// or else those its [`AuthoredComponents`] names.
     fn patches(
         &self,
         world: &World,
         entity: Entity,
         base: Option<Entity>,
+        only: Option<&HashSet<TypeId>>,
     ) -> Result<Vec<(String, Body)>, BsnWriteError> {
         let entity_ref = world.entity(entity);
         let components = world.components();
         let present: Vec<_> = entity_ref.archetype().components().to_vec();
         // A recorded set is what the entity's author set; without one, everything reflected.
-        let authored = entity_ref.get::<AuthoredComponents>().map(|a| &a.0);
+        let authored = only.or_else(|| entity_ref.get::<AuthoredComponents>().map(|a| &a.0));
         let required: HashSet<_> = present
             .iter()
             .filter_map(|id| components.get_info(*id))
@@ -444,6 +520,7 @@ impl<'a> Writer<'a> {
             || type_id == TypeId::of::<ChildOf>()
             || type_id == TypeId::of::<SceneBase>()
             || type_id == TypeId::of::<AuthoredComponents>()
+            || type_id == TypeId::of::<PatchedComponents>()
             || type_id == TypeId::of::<Disabled>()
             || self.derived.contains(&type_id)
             || self.settings.skip_components.contains(&type_id)
@@ -832,13 +909,21 @@ fn collect_refs(node: &Node, refs: &mut Vec<(Entity, String)>) {
             _ => {}
         }
     }
-    for (_, body) in &node.patches {
-        match body {
-            Body::Unit => {}
-            Body::Struct(fields) => fields.iter().for_each(|(_, f)| walk(f, refs)),
-            Body::Tuple(items) => items.iter().for_each(|i| walk(i, refs)),
+    fn walk_block(block: &PatchBlock, refs: &mut Vec<(Entity, String)>) {
+        walk_patches(&block.patches, refs);
+        block.nested.iter().for_each(|b| walk_block(b, refs));
+    }
+    fn walk_patches(patches: &[(String, Body)], refs: &mut Vec<(Entity, String)>) {
+        for (_, body) in patches {
+            match body {
+                Body::Unit => {}
+                Body::Struct(fields) => fields.iter().for_each(|(_, f)| walk(f, refs)),
+                Body::Tuple(items) => items.iter().for_each(|i| walk(i, refs)),
+            }
         }
     }
+    walk_patches(&node.patches, refs);
+    node.descendant_patches.iter().for_each(|b| walk_block(b, refs));
     for child in &node.children {
         collect_refs(child, refs);
     }
@@ -921,6 +1006,11 @@ fn emit_node(document: &mut BsnDocument, node: &Node, names: &HashMap<Entity, St
             entities: children,
         })]
     };
+    let descendant_patches = node
+        .descendant_patches
+        .iter()
+        .map(|block| emit_block(document, block, names))
+        .collect();
     document.push_node(BsnNodeKind::Entity {
         name: names.get(&node.entity).cloned().or_else(|| node.name.clone()),
         name_span: None,
@@ -928,5 +1018,101 @@ fn emit_node(document: &mut BsnDocument, node: &Node, names: &HashMap<Entity, St
         base_span: None,
         patches,
         relations,
+        descendant_patches,
     })
+}
+
+fn emit_block(
+    document: &mut BsnDocument,
+    block: &PatchBlock,
+    names: &HashMap<Entity, String>,
+) -> bevy_bsn::BsnNodeId {
+    let patches = block
+        .patches
+        .iter()
+        .map(|(type_path, body)| emit_patch(document, type_path, body, names))
+        .collect();
+    let descendant_patches = block
+        .nested
+        .iter()
+        .map(|nested| emit_block(document, nested, names))
+        .collect();
+    document.push_node(BsnNodeKind::DescendantPatch {
+        name: block.name.clone(),
+        name_span: bevy_bsn::Span::NONE,
+        patches,
+        descendant_patches,
+    })
+}
+
+/// The entities whose names find `target` below `root` the way nested `patch` blocks do: each
+/// the deepest of `target`'s ancestors (or `target` itself) whose name is unique below the one
+/// before it. `None` if some step has no such name.
+fn name_path(world: &World, root: Entity, target: Entity) -> Option<Vec<Entity>> {
+    let mut chain = vec![target];
+    while let Some(parent) = world.get::<ChildOf>(*chain.last()?).map(ChildOf::parent) {
+        if parent == root {
+            break;
+        }
+        chain.push(parent);
+    }
+    chain.reverse();
+    let name = |entity: Entity| world.get::<Name>(entity).map(Name::as_str);
+    let mut path = Vec::new();
+    let (mut scope, mut start) = (root, 0);
+    while path.last() != Some(&target) {
+        let index = (start..chain.len()).rev().find(|&index| {
+            name(chain[index]).is_some_and(|wanted| named_below(world, scope, wanted) == 1)
+        })?;
+        path.push(chain[index]);
+        (scope, start) = (chain[index], index + 1);
+    }
+    Some(path)
+}
+
+/// How many entities below `scope` are named `wanted`.
+fn named_below(world: &World, scope: Entity, wanted: &str) -> usize {
+    let mut count = 0;
+    let mut stack: Vec<Entity> = world.get::<Children>(scope).map(|c| c.to_vec()).unwrap_or_default();
+    while let Some(entity) = stack.pop() {
+        if world.get::<Name>(entity).is_some_and(|n| n.as_str() == wanted) {
+            count += 1;
+        }
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    count
+}
+
+/// Files `patches` under the blocks `path` names, sharing blocks with earlier paths.
+fn insert_block(
+    world: &World,
+    blocks: &mut Vec<PatchBlock>,
+    path: &[Entity],
+    patches: Vec<(String, Body)>,
+) {
+    let Some((&first, rest)) = path.split_first() else {
+        return;
+    };
+    let index = match blocks.iter().position(|block| block.entity == first) {
+        Some(index) => index,
+        None => {
+            blocks.push(PatchBlock {
+                entity: first,
+                name: world
+                    .get::<Name>(first)
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default(),
+                patches: Vec::new(),
+                nested: Vec::new(),
+            });
+            blocks.len() - 1
+        }
+    };
+    if rest.is_empty() {
+        blocks[index].patches = patches;
+    } else {
+        insert_block(world, &mut blocks[index].nested, rest, patches);
+    }
 }

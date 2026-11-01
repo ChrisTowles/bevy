@@ -1657,6 +1657,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         let id = document.push_value(BsnValue::EntityRef("Root".to_string()));
@@ -1681,6 +1682,7 @@ mod tests {
             base_span: None,
             patches: Vec::new(),
             relations: Vec::new(),
+            descendant_patches: Vec::new(),
         });
         document.push_root(root);
         let id = document.push_value(BsnValue::EntityRef("Root".to_string()));

@@ -62,7 +62,8 @@ pub struct BsnValueNode {
     pub value: BsnValue,
 }
 
-/// The three kinds of node: entities, the patches applied to them, and their relations.
+/// The kinds of node: entities, the patches applied to them, their relations, and the patches an
+/// inheriting entity makes to its base's descendants.
 #[derive(Clone, Debug)]
 pub enum BsnNodeKind {
     /// An entity: an optional `#Name`, an optional `:"base.bsn"` include, and its entries.
@@ -81,6 +82,25 @@ pub enum BsnNodeKind {
         /// The entity's relations, in source order. Every id refers to a
         /// [`BsnNodeKind::Relation`].
         relations: Vec<BsnNodeId>,
+        /// The `patch #Name { … }` entries patching the base's descendants, in source order.
+        /// Every id refers to a [`BsnNodeKind::DescendantPatch`].
+        descendant_patches: Vec<BsnNodeId>,
+    },
+    /// `patch #Name { … }`: patches the one descendant named `Name` that the enclosing entity
+    /// inherits from its `:"base.bsn"`, at any depth, instead of adding an entity. A nested
+    /// `patch` looks only below the descendant its parent block matched, which is how a name the
+    /// base repeats is told apart.
+    DescendantPatch {
+        /// The name of the descendant, without the `#`.
+        name: String,
+        /// The source range of the `#Name`.
+        name_span: Span,
+        /// The patches applied to the descendant, in source order. Every id refers to a
+        /// [`BsnNodeKind::Patch`].
+        patches: Vec<BsnNodeId>,
+        /// Nested `patch #Name { … }` entries, in source order. Every id refers to a
+        /// [`BsnNodeKind::DescendantPatch`].
+        descendant_patches: Vec<BsnNodeId>,
     },
     /// A patch applied to the enclosing entity, such as `Transform { … }`.
     Patch {
@@ -397,6 +417,7 @@ impl BsnDocument {
                     base,
                     patches,
                     relations,
+                    descendant_patches,
                     ..
                 },
                 BsnNodeKind::Entity {
@@ -404,21 +425,33 @@ impl BsnDocument {
                     base: other_base,
                     patches: other_patches,
                     relations: other_relations,
+                    descendant_patches: other_descendant_patches,
                     ..
                 },
             ) => {
                 name == other_name
                     && base == other_base
-                    && patches.len() == other_patches.len()
-                    && relations.len() == other_relations.len()
-                    && patches
-                        .iter()
-                        .zip(other_patches)
-                        .all(|(a, b)| self.node_eq(*a, other, *b, depth + 1))
-                    && relations
-                        .iter()
-                        .zip(other_relations)
-                        .all(|(a, b)| self.node_eq(*a, other, *b, depth + 1))
+                    && self.nodes_eq(patches, other, other_patches, depth)
+                    && self.nodes_eq(relations, other, other_relations, depth)
+                    && self.nodes_eq(descendant_patches, other, other_descendant_patches, depth)
+            }
+            (
+                BsnNodeKind::DescendantPatch {
+                    name,
+                    patches,
+                    descendant_patches,
+                    ..
+                },
+                BsnNodeKind::DescendantPatch {
+                    name: other_name,
+                    patches: other_patches,
+                    descendant_patches: other_descendant_patches,
+                    ..
+                },
+            ) => {
+                name == other_name
+                    && self.nodes_eq(patches, other, other_patches, depth)
+                    && self.nodes_eq(descendant_patches, other, other_descendant_patches, depth)
             }
             (
                 BsnNodeKind::Patch {
@@ -455,6 +488,20 @@ impl BsnDocument {
             }
             _ => false,
         }
+    }
+
+    fn nodes_eq(
+        &self,
+        ids: &[BsnNodeId],
+        other: &BsnDocument,
+        other_ids: &[BsnNodeId],
+        depth: u32,
+    ) -> bool {
+        ids.len() == other_ids.len()
+            && ids
+                .iter()
+                .zip(other_ids)
+                .all(|(a, b)| self.node_eq(*a, other, *b, depth + 1))
     }
 
     fn value_eq(
@@ -549,6 +596,7 @@ impl BsnDocument {
                 base,
                 patches,
                 relations,
+                descendant_patches,
                 ..
             } => {
                 let name = name
@@ -558,7 +606,23 @@ impl BsnDocument {
                     .as_deref()
                     .map_or_else(|| "-".to_string(), escape_string);
                 let _ = writeln!(out, "{pad}Entity#{} name={name} base={base}", node.id.0);
-                for entry in merge_entries(self, patches, relations) {
+                for entry in merge_entries(self, &[patches, relations, descendant_patches]) {
+                    self.debug_node(entry, indent + 2, out);
+                }
+            }
+            BsnNodeKind::DescendantPatch {
+                name,
+                patches,
+                descendant_patches,
+                ..
+            } => {
+                let _ = writeln!(
+                    out,
+                    "{pad}DescendantPatch#{} name={}",
+                    node.id.0,
+                    escape_string(name)
+                );
+                for entry in merge_entries(self, &[patches, descendant_patches]) {
                     self.debug_node(entry, indent + 2, out);
                 }
             }
@@ -618,7 +682,7 @@ fn debug_value_head(value: &BsnValue) -> String {
 /// A guard against pathological or cyclic hand-built documents.
 pub(crate) const MAX_WALK_DEPTH: u32 = 256;
 
-/// Merges an entity's patches and relations back into source order.
+/// Merges an entity's patches, relations and descendant patches back into source order.
 ///
 /// Entries are ordered by [`Span::start`], with ties broken by ascending id, so a
 /// synthesized document (all spans [`Span::NONE`]) prints in builder order.
@@ -627,12 +691,8 @@ pub(crate) const MAX_WALK_DEPTH: u32 = 256;
 /// appending to an entity that came from [`parse`](crate::parse) appends to its printed form
 /// too — patch order is semantically significant, and "appended last" is what the builder
 /// asked for. A dangling id has no span either and is ordered the same way.
-pub(crate) fn merge_entries(
-    document: &BsnDocument,
-    patches: &[BsnNodeId],
-    relations: &[BsnNodeId],
-) -> Vec<BsnNodeId> {
-    let mut entries: Vec<BsnNodeId> = patches.iter().chain(relations).copied().collect();
+pub(crate) fn merge_entries(document: &BsnDocument, lists: &[&Vec<BsnNodeId>]) -> Vec<BsnNodeId> {
+    let mut entries: Vec<BsnNodeId> = lists.iter().flat_map(|list| list.iter()).copied().collect();
     entries.sort_by_key(|id| {
         let start = document.node(*id).map_or(u32::MAX, |node| {
             if node.span.is_none() {

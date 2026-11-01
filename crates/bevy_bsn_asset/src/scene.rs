@@ -13,9 +13,9 @@ use bevy_reflect::{std_traits::ReflectDefault, PartialReflect, ReflectFromReflec
 
 use crate::template::DynamicComponentTemplate;
 use bevy_scene::{
-    erased_template_as_partial_reflect_mut, AuthoredComponents, CachedSceneAsset,
-    NameEntityReference, ResolveContext, SceneBase,
-    ResolveSceneError, ResolvedScene, Scene, SceneDependencies, ScenePatch,
+    erased_template_as_partial_reflect_mut, AuthoredComponents, CachedSceneAsset, DescendantPatch,
+    ErasedTemplate, InheritedEntity, NameEntityReference, PatchedComponents, ResolveContext,
+    ResolveSceneError, ResolvedScene, Scene, SceneBase, SceneDependencies, ScenePatch,
 };
 
 /// A [`Scene`] built from a parsed `.bsn` document.
@@ -77,6 +77,19 @@ pub(crate) struct DynamicSceneEntity {
     pub(crate) patches: Vec<DynamicPatch>,
     /// Relations (`Children [ … ]`), in document order.
     pub(crate) relations: Vec<DynamicRelation>,
+    /// `patch #Name { … }` blocks patching the base's descendants, in document order. Only an
+    /// entity with a `base` has any.
+    pub(crate) descendant_patches: Vec<DynamicDescendantPatch>,
+}
+
+/// A `patch #Name { … }` block.
+pub(crate) struct DynamicDescendantPatch {
+    /// The name of the descendant it patches.
+    pub(crate) name: Name,
+    /// Component/template patches, in document order.
+    pub(crate) patches: Vec<DynamicPatch>,
+    /// Nested blocks, which look below the descendant this one matched.
+    pub(crate) descendant_patches: Vec<DynamicDescendantPatch>,
 }
 
 /// A `#Name` declaration and the reference identity it establishes.
@@ -146,7 +159,7 @@ impl Scene for DynamicScene {
         scene: &mut ResolvedScene,
     ) -> Result<(), ResolveSceneError> {
         let inner = &*self.0;
-        resolve_entity(&inner.root, &inner.type_registry, context, scene)
+        resolve_entity(&inner.root, inner, context, scene)
     }
 
     fn register_dependencies(&self, dependencies: &mut SceneDependencies) {
@@ -162,10 +175,11 @@ impl Scene for DynamicScene {
 /// Resolves one entity of the document into `scene`, recursing into its relations.
 fn resolve_entity(
     entity: &DynamicSceneEntity,
-    registry: &AppTypeRegistry,
+    inner: &DynamicSceneInner,
     context: &mut ResolveContext,
     scene: &mut ResolvedScene,
 ) -> Result<(), ResolveSceneError> {
+    let registry = &inner.type_registry;
     // (1) The base include has to come first: `include_cached` rejects a late include, and the
     //     copy-on-write behavior of every template access below depends on `context.cached`.
     if let Some(base) = &entity.base {
@@ -211,7 +225,7 @@ fn resolve_entity(
             // later sibling would otherwise resolve against a cached scene it does not own.
             context.cached = None;
             let mut child_scene = ResolvedScene::default();
-            result = resolve_entity(child, registry, context, &mut child_scene);
+            result = resolve_entity(child, inner, context, &mut child_scene);
             if result.is_err() {
                 break;
             }
@@ -221,7 +235,131 @@ fn resolve_entity(
         result?;
     }
 
+    // (5) Patches to the base's descendants, each seeded from what the base gives its descendant.
+    if let Some(base) = &entity.base
+        && !entity.descendant_patches.is_empty()
+    {
+        let Some(base_root) = context.cached.and_then(|patch| patch.resolved.as_deref()) else {
+            return Err(ResolveSceneError::DescendantPatchBaseUnresolved {
+                scene: inner.source.to_string(),
+                base: base.to_string(),
+            });
+        };
+        let root = InheritedEntity::root(&base_root.scene, context.patches);
+        let mut cx = DescendantCx {
+            inner,
+            base: base.to_string(),
+            type_registry: context.type_registry,
+            path: Vec::new(),
+        };
+        for patch in &entity.descendant_patches {
+            scene.push_descendant_patch(resolve_descendant_patch(patch, &root, &mut cx)?);
+        }
+    }
+
     Ok(())
+}
+
+/// What resolving one entity's `patch` blocks needs besides the blocks.
+struct DescendantCx<'a> {
+    inner: &'a DynamicSceneInner,
+    /// The base whose descendants are patched, for errors.
+    base: String,
+    type_registry: Option<&'a bevy_reflect::TypeRegistry>,
+    /// The names of the enclosing blocks, outermost first, for errors.
+    path: Vec<String>,
+}
+
+/// Finds the one descendant of `scope` that `patch` names and seeds the patch from it.
+fn resolve_descendant_patch(
+    patch: &DynamicDescendantPatch,
+    scope: &InheritedEntity,
+    cx: &mut DescendantCx,
+) -> Result<DescendantPatch, ResolveSceneError> {
+    cx.path.push(format!("#{:?}", patch.name.as_str()));
+    let mut matches = Vec::new();
+    let mut unresolved = None;
+    scope.visit_descendants(&mut |descendant| {
+        if descendant.name() == Some(&patch.name) {
+            matches.push(descendant.clone());
+        }
+        if unresolved.is_none() {
+            unresolved = descendant.unresolved_base();
+        }
+    });
+    // A base below that is not resolved yet hides what it spawns: the search would be wrong.
+    if let Some(base) = unresolved {
+        return Err(ResolveSceneError::DescendantPatchBaseUnresolved {
+            scene: cx.inner.source.to_string(),
+            base: base.map_or_else(|| "<unnamed>".to_string(), ToString::to_string),
+        });
+    }
+    let found = matches.len();
+    let mut matches = matches.into_iter();
+    let target = match (matches.next(), found) {
+        (Some(target), 1) => target,
+        (None, _) => {
+            return Err(ResolveSceneError::DescendantNotFound {
+                scene: cx.inner.source.to_string(),
+                base: cx.base.clone(),
+                path: cx.path.join(" > "),
+            });
+        }
+        (Some(_), found) => {
+            return Err(ResolveSceneError::DescendantAmbiguous {
+                scene: cx.inner.source.to_string(),
+                base: cx.base.clone(),
+                path: cx.path.join(" > "),
+                found,
+            });
+        }
+    };
+
+    // Copy-on-write from the descendant as it is applied, so that a partial patch keeps the
+    // fields the base gives it. Two patches of one type in a block share a slot.
+    let mut templates: Vec<(TypeId, Box<dyn ErasedTemplate>)> = Vec::new();
+    let mut patched = target
+        .template(TypeId::of::<PatchedComponents>())
+        .and_then(|template| (template as &dyn core::any::Any).downcast_ref::<PatchedComponents>())
+        .cloned()
+        .unwrap_or_default();
+    for component in &patch.patches {
+        let index = match templates
+            .iter()
+            .position(|(type_id, _)| *type_id == component.template_type_id)
+        {
+            Some(index) => index,
+            None => {
+                let template = match target.template(component.template_type_id) {
+                    Some(template) => template.clone_template(),
+                    None => new_template(component, &cx.inner.type_registry),
+                };
+                templates.push((component.template_type_id, template));
+                templates.len() - 1
+            }
+        };
+        apply_patch_value(
+            component,
+            &mut *templates[index].1,
+            &cx.inner.type_registry,
+            cx.type_registry,
+        )?;
+        patched.0.insert(component.component_type_id);
+    }
+
+    let mut scene = ResolvedScene::default();
+    for (type_id, template) in templates {
+        scene.insert_erased_template(type_id, template);
+    }
+    scene.insert_template(patched);
+    for nested in &patch.descendant_patches {
+        scene.push_descendant_patch(resolve_descendant_patch(nested, &target, cx)?);
+    }
+    cx.path.pop();
+    Ok(DescendantPatch {
+        name: patch.name.clone(),
+        scene,
+    })
 }
 
 /// Applies a single [`DynamicPatch`] to its template slot in `scene`.
@@ -233,22 +371,37 @@ fn resolve_patch(
 ) -> Result<(), ResolveSceneError> {
     // The type data is only cloned when the slot has to be created: `default` is an `FnOnce` that
     // borrows `patch` and `registry`, both disjoint from the `&mut` borrows of `scene`/`context`.
+    let type_registry = context.type_registry;
     let erased = scene.get_or_insert_erased_template(context, patch.template_type_id, || {
-        Box::new(DynamicComponentTemplate::new(
-            patch.template_type_id,
-            patch.reflect_default.default(),
-            patch.reflect_component.clone(),
-            patch.reflect_template.clone(),
-            patch.reflect_default.clone(),
-            patch.reflect_from_reflect.clone(),
-            registry.clone(),
-        ))
+        new_template(patch, registry)
     });
+    apply_patch_value(patch, erased, registry, type_registry)
+}
 
+/// A fresh template for `patch`'s slot, holding the template type's default.
+fn new_template(patch: &DynamicPatch, registry: &AppTypeRegistry) -> Box<dyn ErasedTemplate> {
+    Box::new(DynamicComponentTemplate::new(
+        patch.template_type_id,
+        patch.reflect_default.default(),
+        patch.reflect_component.clone(),
+        patch.reflect_template.clone(),
+        patch.reflect_default.clone(),
+        patch.reflect_from_reflect.clone(),
+        registry.clone(),
+    ))
+}
+
+/// Applies `patch`'s value to the template in its slot.
+fn apply_patch_value(
+    patch: &DynamicPatch,
+    erased: &mut dyn ErasedTemplate,
+    registry: &AppTypeRegistry,
+    type_registry: Option<&bevy_reflect::TypeRegistry>,
+) -> Result<(), ResolveSceneError> {
     // Prefer the registry the resolve entry point already read-locked: taking a second read lock
     // on the same registry from inside `Scene::resolve` risks deadlocking against a queued writer.
     let guard;
-    let type_registry = match context.type_registry {
+    let type_registry = match type_registry {
         Some(type_registry) => type_registry,
         None => {
             guard = registry.read();

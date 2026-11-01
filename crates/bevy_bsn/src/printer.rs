@@ -253,6 +253,7 @@ impl Printer<'_> {
             base,
             patches,
             relations,
+            descendant_patches,
             ..
         } = &node.kind
         else {
@@ -267,7 +268,18 @@ impl Printer<'_> {
         if let Some(name) = name {
             let _ = writeln!(out, "{pad}#{}", print_name(name));
         }
-        for entry in merge_entries(document, patches, relations) {
+        self.entries(out, &merge_entries(document, &[patches, relations, descendant_patches]), level);
+        if out.len() == start {
+            let _ = writeln!(out, "{pad}()");
+        }
+        self.node_stack.pop();
+    }
+
+    /// Appends an entity's or a `patch` block's entries, each on its own lines.
+    fn entries(&mut self, out: &mut String, entries: &[BsnNodeId], level: usize) {
+        let pad = self.indent(level);
+        let document = self.document;
+        for &entry in entries {
             match document.node(entry).map(|node| &node.kind) {
                 Some(BsnNodeKind::Patch { prefix, value, .. }) => {
                     let (prefix, value) = (*prefix, *value);
@@ -283,14 +295,43 @@ impl Printer<'_> {
                     let (path, entities) = (target_symbol.to_type_path(), entities.clone());
                     self.relation(out, &path, &entities, level);
                 }
+                Some(BsnNodeKind::DescendantPatch { .. }) => {
+                    self.descendant_patch(out, entry, level);
+                }
                 _ => {
                     let _ = writeln!(out, "{pad}{INVALID}{}> */", entry.0);
                 }
             }
         }
-        if out.len() == start {
-            let _ = writeln!(out, "{pad}()");
+    }
+
+    /// Appends a `patch #Name { … }` block, its entries one level in.
+    fn descendant_patch(&mut self, out: &mut String, id: BsnNodeId, level: usize) {
+        let pad = self.indent(level);
+        if level > MAX_WALK_DEPTH as usize || self.node_stack.contains(&id) {
+            let _ = writeln!(out, "{pad}{TOO_DEEP}");
+            return;
         }
+        let document = self.document;
+        let Some(BsnNodeKind::DescendantPatch {
+            name,
+            patches,
+            descendant_patches,
+            ..
+        }) = document.node(id).map(|node| &node.kind)
+        else {
+            let _ = writeln!(out, "{pad}{INVALID}{}> */", id.0);
+            return;
+        };
+        let entries = merge_entries(document, &[patches, descendant_patches]);
+        if entries.is_empty() {
+            let _ = writeln!(out, "{pad}patch #{} {{}}", print_name(name));
+            return;
+        }
+        self.node_stack.push(id);
+        let _ = writeln!(out, "{pad}patch #{} {{", print_name(name));
+        self.entries(out, &entries, level + 1);
+        let _ = writeln!(out, "{pad}}}");
         self.node_stack.pop();
     }
 
