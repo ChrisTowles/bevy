@@ -712,7 +712,9 @@ fn preorder_nodes(document: &BsnDocument) -> Vec<u32> {
                 descendant_patches,
                 ..
             } => {
-                for entry in crate::ast::merge_entries(document, &[patches, relations, descendant_patches]) {
+                for entry in
+                    crate::ast::merge_entries(document, &[patches, relations, descendant_patches])
+                {
                     walk(document, entry, out);
                 }
             }

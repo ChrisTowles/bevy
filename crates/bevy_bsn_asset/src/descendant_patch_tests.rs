@@ -5,14 +5,8 @@ use std::path::Path;
 use bevy_app::App;
 use bevy_asset::{AssetServer, Handle};
 use bevy_ecs::{
-    entity::Entity,
-    hierarchy::Children,
-    lifecycle::Insert,
-    name::Name,
-    observer::On,
-    resource::Resource,
-    system::ResMut,
-    world::World,
+    entity::Entity, hierarchy::Children, lifecycle::Insert, name::Name, observer::On,
+    resource::Resource, system::ResMut, world::World,
 };
 use bevy_scene::{PatchedComponents, ScenePatch, WorldSceneExt};
 use core::any::TypeId;
@@ -62,7 +56,11 @@ fn find(world: &World, root: Entity, name: &str) -> Vec<Entity> {
         if let Some(children) = world.get::<Children>(entity) {
             stack.extend(children.iter());
         }
-        if entity != root && world.get::<Name>(entity).is_some_and(|n| n.as_str() == name) {
+        if entity != root
+            && world
+                .get::<Name>(entity)
+                .is_some_and(|n| n.as_str() == name)
+        {
             found.push(entity);
         }
     }
@@ -81,14 +79,29 @@ fn a_patch_block_patches_the_named_descendant_instead_of_adding_one() {
         "a.bsn",
         "Children [ #X Position { x: 1.0, y: 2.0 } -- #Y Marker ]",
     )]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }",
+    );
     let world = app.world_mut();
     let root = world.spawn_scene(b).unwrap().id();
 
-    assert_eq!(world.get::<Children>(root).unwrap().len(), 2, "nothing was added");
+    assert_eq!(
+        world.get::<Children>(root).unwrap().len(),
+        2,
+        "nothing was added"
+    );
     let x = one(world, root, "X");
     // A partial patch keeps the fields the base gives it.
-    assert_eq!(world.get::<Position>(x), Some(&Position { x: 1.0, y: 5.0, z: 0.0 }));
+    assert_eq!(
+        world.get::<Position>(x),
+        Some(&Position {
+            x: 1.0,
+            y: 5.0,
+            z: 0.0
+        })
+    );
     assert!(world
         .get::<PatchedComponents>(x)
         .is_some_and(|patched| patched.0.contains(&TypeId::of::<Position>())));
@@ -102,13 +115,24 @@ fn a_patch_block_finds_a_descendant_at_any_depth_by_its_name_component() {
         "a.bsn",
         "Children [ #Wall Children [ bevy_ecs::name::Name(\"Wall.Glass\") Position { z: 4.0 } ] ]",
     )]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #\"Wall.Glass\" { Marker }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #\"Wall.Glass\" { Marker }",
+    );
     let world = app.world_mut();
     let root = world.spawn_scene(b).unwrap().id();
 
     let glass = one(world, root, "Wall.Glass");
     assert!(world.get::<Marker>(glass).is_some());
-    assert_eq!(world.get::<Position>(glass), Some(&Position { x: 0.0, y: 0.0, z: 4.0 }));
+    assert_eq!(
+        world.get::<Position>(glass),
+        Some(&Position {
+            x: 0.0,
+            y: 0.0,
+            z: 4.0
+        })
+    );
 }
 
 #[test]
@@ -117,7 +141,11 @@ fn the_patched_component_is_inserted_once() {
     struct Inserts(usize);
 
     let (mut app, _handles) = app_with(&[("a.bsn", "Children [ #X Position { x: 1.0 } ]")]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }",
+    );
     let world = app.world_mut();
     world.init_resource::<Inserts>();
     world.add_observer(|_: On<Insert<Position>>, mut inserts: ResMut<Inserts>| {
@@ -153,13 +181,24 @@ fn a_nested_patch_block_tells_apart_a_name_the_base_repeats() {
     let in_a = one(world, a, "Light");
     let in_b = one(world, b, "Light");
     assert_eq!(world.get::<Position>(in_a), Some(&Position::default()));
-    assert_eq!(world.get::<Position>(in_b), Some(&Position { x: 3.0, y: 0.0, z: 0.0 }));
+    assert_eq!(
+        world.get::<Position>(in_b),
+        Some(&Position {
+            x: 3.0,
+            y: 0.0,
+            z: 0.0
+        })
+    );
 }
 
 #[test]
 fn a_name_that_matches_nothing_names_the_scene_the_base_and_the_name() {
     let (mut app, _handles) = app_with(&[("a.bsn", "Children [ #X ]")]);
-    let b = scene(&app, "levels/b.bsn", ":\"a.bsn\"\npatch #X { patch #Nope { Marker } }");
+    let b = scene(
+        &app,
+        "levels/b.bsn",
+        ":\"a.bsn\"\npatch #X { patch #Nope { Marker } }",
+    );
     let Err(error) = app.world_mut().spawn_scene(b) else {
         panic!("a patch naming no descendant must not resolve");
     };
@@ -194,11 +233,22 @@ fn an_outer_patch_lands_on_an_inner_one() {
             "Children [ :\"room.bsn\" #R patch #X { Position { x: 7.0 } } ]",
         ),
     ]);
-    let level = scene(&app, "level.bsn", ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }");
+    let level = scene(
+        &app,
+        "level.bsn",
+        ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }",
+    );
     let world = app.world_mut();
     let root = world.spawn_scene(level).unwrap().id();
     let x = one(world, root, "X");
-    assert_eq!(world.get::<Position>(x), Some(&Position { x: 7.0, y: 9.0, z: 1.0 }));
+    assert_eq!(
+        world.get::<Position>(x),
+        Some(&Position {
+            x: 7.0,
+            y: 9.0,
+            z: 1.0
+        })
+    );
 }
 
 #[test]
@@ -212,16 +262,30 @@ fn a_patch_reaches_into_a_base_child_that_has_a_base_of_its_own() {
     let root = world.spawn_scene(level).unwrap().id();
     let pane = one(world, root, "Pane");
     assert!(world.get::<Marker>(pane).is_some());
-    assert_eq!(world.get::<Position>(pane), Some(&Position { x: 0.0, y: 0.0, z: 2.0 }));
+    assert_eq!(
+        world.get::<Position>(pane),
+        Some(&Position {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0
+        })
+    );
 }
 
 #[test]
 fn an_outer_patch_records_what_both_patches_set() {
     let (mut app, _handles) = app_with(&[
         ("room.bsn", "Children [ #X ]"),
-        ("house.bsn", "Children [ :\"room.bsn\" #R patch #X { Marker } ]"),
+        (
+            "house.bsn",
+            "Children [ :\"room.bsn\" #R patch #X { Marker } ]",
+        ),
     ]);
-    let level = scene(&app, "level.bsn", ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }");
+    let level = scene(
+        &app,
+        "level.bsn",
+        ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }",
+    );
     let world = app.world_mut();
     let root = world.spawn_scene(level).unwrap().id();
     let x = one(world, root, "X");
@@ -238,7 +302,11 @@ fn a_base_below_that_did_not_resolve_is_named_instead_of_missing_the_name() {
         ("door.bsn", ":\"knob.bsn\"\npatch #Nothing { Marker }"),
         ("room.bsn", "Children [ :\"door.bsn\" #Door ]"),
     ]);
-    let level = scene(&app, "levels/b.bsn", ":\"room.bsn\"\npatch #Knob { Marker }");
+    let level = scene(
+        &app,
+        "levels/b.bsn",
+        ":\"room.bsn\"\npatch #Knob { Marker }",
+    );
     let Err(error) = app.world_mut().spawn_scene(level) else {
         panic!("a patch searching below an unresolved base must not resolve");
     };
@@ -256,7 +324,11 @@ fn spawned_names(world: &World, root: Entity) -> Vec<String> {
         .map(|c| c.iter().copied().rev().collect())
         .unwrap_or_default();
     while let Some(entity) = stack.pop() {
-        names.push(world.get::<Name>(entity).map_or(String::new(), |n| n.as_str().to_string()));
+        names.push(
+            world
+                .get::<Name>(entity)
+                .map_or(String::new(), |n| n.as_str().to_string()),
+        );
         if let Some(children) = world.get::<Children>(entity) {
             stack.extend(children.iter().rev());
         }
@@ -278,10 +350,20 @@ fn the_resolve_time_walk_sees_the_tree_that_spawns() {
     ]);
     let walked = {
         let patches = app.world().resource::<bevy_asset::Assets<ScenePatch>>();
-        let level = &patches.get(&handles[2]).unwrap().resolved.as_ref().unwrap().scene;
+        let level = &patches
+            .get(&handles[2])
+            .unwrap()
+            .resolved
+            .as_ref()
+            .unwrap()
+            .scene;
         let mut walked = Vec::new();
         bevy_scene::InheritedEntity::root(level, patches).visit_descendants(&mut |entity| {
-            walked.push(entity.name().map_or(String::new(), |n| n.as_str().to_string()));
+            walked.push(
+                entity
+                    .name()
+                    .map_or(String::new(), |n| n.as_str().to_string()),
+            );
         });
         walked
     };
@@ -307,23 +389,41 @@ fn a_patched_descendant_writes_back_as_a_patch_block() {
         "a.bsn",
         "Children [ #X Position { x: 1.0, y: 2.0 } -- #Y Marker ]",
     )]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }",
+    );
     let root = app.world_mut().spawn_scene(b).unwrap().id();
     let text = write(app.world_mut(), root);
-    assert_eq!(text, ":\"a.bsn\"\npatch #X {\n    bevy_bsn_asset::tests::Position { y: 5.0 }\n}\n");
+    assert_eq!(
+        text,
+        ":\"a.bsn\"\npatch #X {\n    bevy_bsn_asset::tests::Position { y: 5.0 }\n}\n"
+    );
 
     // What it wrote loads back into the same entities.
     let again = scene(&app, "c.bsn", &text);
     let world = app.world_mut();
     let copy = world.spawn_scene(again).unwrap().id();
     let x = one(world, copy, "X");
-    assert_eq!(world.get::<Position>(x), Some(&Position { x: 1.0, y: 5.0, z: 0.0 }));
+    assert_eq!(
+        world.get::<Position>(x),
+        Some(&Position {
+            x: 1.0,
+            y: 5.0,
+            z: 0.0
+        })
+    );
 }
 
 #[test]
 fn only_what_a_patch_block_set_and_still_differs_is_written_back() {
     let (mut app, _handles) = app_with(&[("a.bsn", "Children [ #X Position { x: 1.0 } -- #Y ]")]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }",
+    );
     let root = app.world_mut().spawn_scene(b).unwrap().id();
     let world = app.world_mut();
     let y = one(world, root, "Y");
@@ -367,7 +467,11 @@ fn a_base_s_own_patch_is_not_written_into_the_scene_that_inherits_it() {
             "Children [ :\"room.bsn\" #R patch #X { Position { x: 7.0 } } ]",
         ),
     ]);
-    let level = scene(&app, "level.bsn", ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }");
+    let level = scene(
+        &app,
+        "level.bsn",
+        ":\"house.bsn\"\npatch #X { Position { y: 9.0 } }",
+    );
     let root = app.world_mut().spawn_scene(level).unwrap().id();
     let text = write(app.world_mut(), root);
     assert_eq!(
@@ -379,11 +483,18 @@ fn a_base_s_own_patch_is_not_written_into_the_scene_that_inherits_it() {
 #[test]
 fn a_despawned_sibling_does_not_shift_what_is_written_back() {
     let (mut app, _handles) = app_with(&[("a.bsn", "Children [ #W1 -- #W2 -- #X ]")]);
-    let b = scene(&app, "b.bsn", ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }");
+    let b = scene(
+        &app,
+        "b.bsn",
+        ":\"a.bsn\"\npatch #X { Position { y: 5.0 } }",
+    );
     let root = app.world_mut().spawn_scene(b).unwrap().id();
     let world = app.world_mut();
     let w1 = one(world, root, "W1");
     world.despawn(w1);
     let text = write(world, root);
-    assert_eq!(text, ":\"a.bsn\"\npatch #X {\n    bevy_bsn_asset::tests::Position { y: 5.0 }\n}\n");
+    assert_eq!(
+        text,
+        ":\"a.bsn\"\npatch #X {\n    bevy_bsn_asset::tests::Position { y: 5.0 }\n}\n"
+    );
 }

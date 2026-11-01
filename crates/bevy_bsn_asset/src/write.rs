@@ -26,7 +26,9 @@ use alloc::{
 use core::any::TypeId;
 
 use bevy_asset::{AssetPath, AssetServer, Assets, ReflectAsset, ReflectHandle, UntypedAssetId};
-use bevy_bsn::{BsnDocument, BsnNodeKind, BsnPatchPrefix, BsnPath, BsnValue, BsnValueId, PatchBody};
+use bevy_bsn::{
+    BsnDocument, BsnNodeKind, BsnPatchPrefix, BsnPath, BsnValue, BsnValueId, PatchBody,
+};
 use bevy_ecs::{
     entity::Entity,
     entity_disabling::Disabled,
@@ -37,8 +39,12 @@ use bevy_ecs::{
 };
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_reflect::{
-    enums::{Enum, VariantType}, serde::SerializationData, std_traits::ReflectDefault,
-    structs::Struct, tuple_struct::TupleStruct, PartialReflect, ReflectRef, TypeRegistry,
+    enums::{Enum, VariantType},
+    serde::SerializationData,
+    std_traits::ReflectDefault,
+    structs::Struct,
+    tuple_struct::TupleStruct,
+    PartialReflect, ReflectRef, TypeRegistry,
 };
 use bevy_scene::{AuthoredComponents, PatchedComponents, SceneBase, ScenePatch};
 use thiserror::Error;
@@ -88,7 +94,9 @@ pub enum BsnWriteError {
         component: String,
     },
     /// An [`Entity`] value pointing at an entity that is not written, or not uniquely named.
-    #[error("`{component}` points at an entity outside the scene, or one whose name is not unique")]
+    #[error(
+        "`{component}` points at an entity outside the scene, or one whose name is not unique"
+    )]
     ForeignEntity {
         /// The component holding it.
         component: String,
@@ -311,7 +319,6 @@ impl<'a> Writer<'a> {
 
     /// The document for a written tree: names for every entity a reference points at.
     fn finish(&self, node: Node) -> Result<BsnDocument, BsnWriteError> {
-
         // `#name` per written entity; references need their target named, and uniquely.
         let mut names: HashMap<Entity, String> = HashMap::default();
         let mut taken: HashMap<String, usize> = HashMap::default();
@@ -500,7 +507,9 @@ impl<'a> Writer<'a> {
                     .and_then(|b| reflect_component.reflect(b))
                 {
                     // Inherited unchanged: the base supplies it.
-                    Some(inherited) if equal(inherited.as_partial_reflect(), value.as_partial_reflect()) => {
+                    Some(inherited)
+                        if equal(inherited.as_partial_reflect(), value.as_partial_reflect()) =>
+                    {
                         continue
                     }
                     Some(inherited) => Some(inherited.as_partial_reflect()),
@@ -591,7 +600,8 @@ impl<'a> Writer<'a> {
                             if before.is_some_and(|b| equal(b, field.value())) {
                                 continue;
                             }
-                            fields.push((name.to_string(), self.value(&cx, field.value(), before)?));
+                            fields
+                                .push((name.to_string(), self.value(&cx, field.value(), before)?));
                         }
                         if fields.is_empty() && same.is_some() {
                             Body::Unit
@@ -676,7 +686,8 @@ impl<'a> Writer<'a> {
     /// The `#[reflect(skip_serializing)]` fields of `value`'s type, if it declares any.
     fn serialization(&self, value: &dyn PartialReflect) -> Option<&SerializationData> {
         let info = value.get_represented_type_info()?;
-        self.registry.get_type_data::<SerializationData>(info.type_id())
+        self.registry
+            .get_type_data::<SerializationData>(info.type_id())
     }
 
     /// `value` as a `.bsn` value. A struct or tuple struct writes only what differs from
@@ -696,7 +707,8 @@ impl<'a> Writer<'a> {
             return Ok(W::Ref(*entity, cx.component.to_string()));
         }
         if let Some(info) = value.get_represented_type_info()
-            && let Some(reflect_handle) = self.registry.get_type_data::<ReflectHandle>(info.type_id())
+            && let Some(reflect_handle) =
+                self.registry.get_type_data::<ReflectHandle>(info.type_id())
         {
             let handle = value
                 .try_as_reflect()
@@ -746,18 +758,27 @@ impl<'a> Writer<'a> {
                     .collect::<Result<_, _>>()?,
             ),
             ReflectRef::List(l) => W::List(
-                l.iter().map(|f| self.value(cx, f, None)).collect::<Result<_, _>>()?,
+                l.iter()
+                    .map(|f| self.value(cx, f, None))
+                    .collect::<Result<_, _>>()?,
             ),
             ReflectRef::Array(a) => W::List(
-                a.iter().map(|f| self.value(cx, f, None)).collect::<Result<_, _>>()?,
+                a.iter()
+                    .map(|f| self.value(cx, f, None))
+                    .collect::<Result<_, _>>()?,
             ),
             ReflectRef::Set(s) => W::List(
-                s.iter().map(|f| self.value(cx, f, None)).collect::<Result<_, _>>()?,
+                s.iter()
+                    .map(|f| self.value(cx, f, None))
+                    .collect::<Result<_, _>>()?,
             ),
             ReflectRef::Map(m) => W::List(
                 m.iter()
                     .map(|(k, v)| {
-                        Ok(W::Tuple(vec![self.value(cx, k, None)?, self.value(cx, v, None)?]))
+                        Ok(W::Tuple(vec![
+                            self.value(cx, k, None)?,
+                            self.value(cx, v, None)?,
+                        ]))
                     })
                     .collect::<Result<_, BsnWriteError>>()?,
             ),
@@ -888,7 +909,11 @@ fn equal(a: &dyn PartialReflect, b: &dyn PartialReflect) -> bool {
     a.reflect_partial_eq(b).unwrap_or(false)
 }
 
-fn collect_names(node: &Node, names: &mut HashMap<Entity, String>, taken: &mut HashMap<String, usize>) {
+fn collect_names(
+    node: &Node,
+    names: &mut HashMap<Entity, String>,
+    taken: &mut HashMap<String, usize>,
+) {
     if let Some(name) = &node.name {
         names.insert(node.entity, name.clone());
         *taken.entry(name.clone()).or_default() += 1;
@@ -923,7 +948,9 @@ fn collect_refs(node: &Node, refs: &mut Vec<(Entity, String)>) {
         }
     }
     walk_patches(&node.patches, refs);
-    node.descendant_patches.iter().for_each(|b| walk_block(b, refs));
+    node.descendant_patches
+        .iter()
+        .for_each(|b| walk_block(b, refs));
     for child in &node.children {
         collect_refs(child, refs);
     }
@@ -944,12 +971,18 @@ fn emit_value(document: &mut BsnDocument, w: &W, names: &HashMap<Entity, String>
         W::Float(v) => BsnValue::Float(*v),
         W::Str(v) => BsnValue::String(v.clone()),
         W::Path(p) => BsnValue::Path(path(p)),
-        W::Tuple(items) => {
-            BsnValue::Tuple(items.iter().map(|i| emit_value(document, i, names)).collect())
-        }
-        W::List(items) => {
-            BsnValue::List(items.iter().map(|i| emit_value(document, i, names)).collect())
-        }
+        W::Tuple(items) => BsnValue::Tuple(
+            items
+                .iter()
+                .map(|i| emit_value(document, i, names))
+                .collect(),
+        ),
+        W::List(items) => BsnValue::List(
+            items
+                .iter()
+                .map(|i| emit_value(document, i, names))
+                .collect(),
+        ),
         W::Struct(p, fields) => BsnValue::Struct(
             path(p),
             fields
@@ -959,7 +992,10 @@ fn emit_value(document: &mut BsnDocument, w: &W, names: &HashMap<Entity, String>
         ),
         W::Named(p, items) => BsnValue::NamedTuple(
             path(p),
-            items.iter().map(|i| emit_value(document, i, names)).collect(),
+            items
+                .iter()
+                .map(|i| emit_value(document, i, names))
+                .collect(),
         ),
         W::Ref(e, _) => BsnValue::EntityRef(names.get(e).cloned().unwrap_or_default()),
     };
@@ -980,14 +1016,21 @@ fn emit_patch(
                 .map(|(n, f)| (n.clone(), emit_value(document, f, names)))
                 .collect(),
         ),
-        Body::Tuple(items) => {
-            PatchBody::Tuple(items.iter().map(|i| emit_value(document, i, names)).collect())
-        }
+        Body::Tuple(items) => PatchBody::Tuple(
+            items
+                .iter()
+                .map(|i| emit_value(document, i, names))
+                .collect(),
+        ),
     };
     document.push_patch(BsnPatchPrefix::FromTemplate, path(type_path), body)
 }
 
-fn emit_node(document: &mut BsnDocument, node: &Node, names: &HashMap<Entity, String>) -> bevy_bsn::BsnNodeId {
+fn emit_node(
+    document: &mut BsnDocument,
+    node: &Node,
+    names: &HashMap<Entity, String>,
+) -> bevy_bsn::BsnNodeId {
     let patches = node
         .patches
         .iter()
@@ -1012,7 +1055,10 @@ fn emit_node(document: &mut BsnDocument, node: &Node, names: &HashMap<Entity, St
         .map(|block| emit_block(document, block, names))
         .collect();
     document.push_node(BsnNodeKind::Entity {
-        name: names.get(&node.entity).cloned().or_else(|| node.name.clone()),
+        name: names
+            .get(&node.entity)
+            .cloned()
+            .or_else(|| node.name.clone()),
         name_span: None,
         base: node.base.clone(),
         base_span: None,
@@ -1073,9 +1119,15 @@ fn name_path(world: &World, root: Entity, target: Entity) -> Option<Vec<Entity>>
 /// How many entities below `scope` are named `wanted`.
 fn named_below(world: &World, scope: Entity, wanted: &str) -> usize {
     let mut count = 0;
-    let mut stack: Vec<Entity> = world.get::<Children>(scope).map(|c| c.to_vec()).unwrap_or_default();
+    let mut stack: Vec<Entity> = world
+        .get::<Children>(scope)
+        .map(|c| c.to_vec())
+        .unwrap_or_default();
     while let Some(entity) = stack.pop() {
-        if world.get::<Name>(entity).is_some_and(|n| n.as_str() == wanted) {
+        if world
+            .get::<Name>(entity)
+            .is_some_and(|n| n.as_str() == wanted)
+        {
             count += 1;
         }
         if let Some(children) = world.get::<Children>(entity) {

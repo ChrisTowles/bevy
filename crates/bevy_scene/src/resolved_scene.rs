@@ -1,4 +1,5 @@
 use crate::{Ready, ResolveContext, ResolveSceneError, Scene, SceneList, ScenePatch};
+use alloc::{borrow::Cow, rc::Rc};
 use bevy_asset::{AssetId, AssetPath, AssetServer, Assets, Handle, UntypedAssetId};
 use bevy_ecs::{
     bundle::{Bundle, BundleScratch, BundleWriter},
@@ -15,7 +16,6 @@ use bevy_ecs::{
 };
 use bevy_platform::collections::HashSet;
 use bevy_reflect::{PartialReflect, ReflectFromPtr, ReflectFromReflect, TypeRegistry};
-use alloc::{borrow::Cow, rc::Rc};
 use bevy_utils::{TypeIdHashMap, TypeIdIndexMap};
 use core::any::{Any, TypeId};
 use thiserror::Error;
@@ -604,11 +604,7 @@ impl ResolvedScene {
     /// Inserts the given [`Template`] with the given `type_id`. This will overwrite the existing [`Template`] of that type if it already exists.
     ///
     /// For correctness, the stored template's [`ErasedTemplate::template_type_id`] must equal `type_id`.
-    pub fn insert_erased_template(
-        &mut self,
-        type_id: TypeId,
-        template: Box<dyn ErasedTemplate>,
-    ) {
+    pub fn insert_erased_template(&mut self, type_id: TypeId, template: Box<dyn ErasedTemplate>) {
         match self.template_indices.entry(type_id) {
             bevy_utils::TypeIdHashMapEntry::Occupied(occupied_entry) => {
                 let index = *occupied_entry.get();
@@ -1208,8 +1204,11 @@ fn descendant_patches_below<'s, 'a>(
 /// The [`Name`] a template builds, whether it is a statically-typed `Name` or a reflected one.
 fn template_name(template: &dyn ErasedTemplate) -> Option<&Name> {
     let any: &dyn Any = template;
-    any.downcast_ref::<Name>()
-        .or_else(|| template.try_as_partial_reflect()?.try_downcast_ref::<Name>())
+    any.downcast_ref::<Name>().or_else(|| {
+        template
+            .try_as_partial_reflect()?
+            .try_downcast_ref::<Name>()
+    })
 }
 
 /// An entity that applying a [`ResolvedScene`] spawns, seen at resolve time through the scenes it
@@ -1284,10 +1283,11 @@ impl<'a> InheritedEntity<'a> {
     pub fn visit_descendants(&self, visit: &mut impl FnMut(&InheritedEntity<'a>)) {
         // Mirrors `ResolvedScene::apply_with`: the cached scene's related entities first, with
         // this scene's own descendant patches in effect, then this scene's.
-        let below: Rc<[&'a DescendantPatch]> = match descendant_patches_below(&self.active, &self.matched) {
-            Cow::Borrowed(_) => self.active.clone(),
-            Cow::Owned(below) => below.into(),
-        };
+        let below: Rc<[&'a DescendantPatch]> =
+            match descendant_patches_below(&self.active, &self.matched) {
+                Cow::Borrowed(_) => self.active.clone(),
+                Cow::Owned(below) => below.into(),
+            };
         let mut visit_related = |scenes: &'a ResolvedScene, active: &Rc<[&'a DescendantPatch]>| {
             for related in scenes.related.values() {
                 for scene in &related.scenes {

@@ -268,7 +268,11 @@ impl Printer<'_> {
         if let Some(name) = name {
             let _ = writeln!(out, "{pad}#{}", print_name(name));
         }
-        self.entries(out, &merge_entries(document, &[patches, relations, descendant_patches]), level);
+        self.entries(
+            out,
+            &merge_entries(document, &[patches, relations, descendant_patches]),
+            level,
+        );
         if out.len() == start {
             let _ = writeln!(out, "{pad}()");
         }
