@@ -705,8 +705,9 @@ impl AssetApp for App {
             type_registry.register_type_data::<Handle<A>, ReflectFromTemplate>();
             type_registry.register_type_data::<HandleTemplate<A>, ReflectTemplate>();
             // An asset value written in place of a handle becomes an inline asset.
-            type_registry
-                .register_type_conversion::<A, HandleTemplate<A>, _>(|a| Ok(HandleTemplate::value(a)));
+            type_registry.register_type_conversion::<A, HandleTemplate<A>, _>(|a| {
+                Ok(HandleTemplate::value(a))
+            });
             type_registry.register_type_conversion::<String, HandleTemplate<A>, _>(|s| {
                 // Validate before converting: `HandleTemplate: From<String>` goes through
                 // `AssetPath::parse`, which panics on malformed paths, and conversion inputs
@@ -2734,6 +2735,49 @@ mod tests {
             );
             Some(())
         });
+    }
+
+    /// One failed read of an asset is one `AssetLoadFailedEvent`: a reload that fails (the file
+    /// no longer parses) is reported once, by the event and by the log.
+    #[test]
+    fn a_failed_reload_sends_one_failure_event() {
+        let (mut app, dir, source_events) = create_app_with_source_event_sender();
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let good = r#"(
+    text: "a",
+    dependencies: [],
+    embedded_dependencies: [],
+    sub_texts: [],
+)"#;
+        dir.insert_asset_text(Path::new("abc.cool.ron"), good);
+        app.init_asset::<CoolText>()
+            .init_asset::<SubText>()
+            .register_asset_loader(CoolTextLoader);
+        let handle: Handle<CoolText> = asset_server.load("abc.cool.ron");
+        run_app_until(&mut app, |world| {
+            (!collect_asset_events::<CoolText>(world).is_empty()).then_some(())
+        });
+
+        dir.insert_asset_text(Path::new("abc.cool.ron"), "not ron at all");
+        source_events
+            .send_blocking(AssetSourceEvent::ModifiedAsset(PathBuf::from(
+                "abc.cool.ron",
+            )))
+            .unwrap();
+        let mut failures = Vec::new();
+        // Let any second report arrive too: a frame count is the wait here, because the
+        // thing being pinned is that nothing more comes.
+        let mut quiet = 0;
+        run_app_until(&mut app, |world| {
+            let new = collect_asset_load_failed_events::<CoolText>(world);
+            if new.is_empty() && !failures.is_empty() {
+                quiet += 1;
+            }
+            failures.extend(new);
+            (quiet > 200).then_some(())
+        });
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].id, handle.id());
     }
 
     #[test]

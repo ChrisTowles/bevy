@@ -5,7 +5,10 @@ use crate::{
 use alloc::sync::Arc;
 use bevy_ecs::template::{FromTemplate, SpecializeFromTemplate, Template, TemplateContext};
 use bevy_platform::{collections::Equivalent, sync::Mutex};
-use bevy_reflect::{std_traits::ReflectDefault, enums::Enum, FromReflect, PartialReflect, Reflect, ReflectRef, TypePath};
+use bevy_reflect::{
+    enums::Enum, std_traits::ReflectDefault, FromReflect, PartialReflect, Reflect, ReflectRef,
+    TypePath,
+};
 use core::{
     any::TypeId,
     hash::{Hash, Hasher},

@@ -791,6 +791,7 @@ impl AssetServer {
                     .get_path_handles(&path)
                     .map(|handle| server.load_internal(Some(handle), path.clone(), true, None))
                     .collect::<Vec<_>>();
+                let tried = !requests.is_empty();
 
                 for result in requests {
                     // Count each reload as a started load.
@@ -809,7 +810,11 @@ impl AssetServer {
                 // reload all the subassets (though this is not guaranteed).
                 // TODO: Make sure we use the same loader as the original load (e.g., by storing a
                 // map from asset index to loader).
-                if !reloaded && server.read_infos().should_reload(&path) {
+                //
+                // Only when no handle was tried: after the section above failed on a live handle
+                // (the file no longer parses), reading the file again fails the same way and sends
+                // the same failure event and error a second time.
+                if !reloaded && !tried && server.read_infos().should_reload(&path) {
                     server.write_infos().stats.started_load_tasks += 1;
                     match server.load_internal(None, path.clone(), true, None).await {
                         Ok(_) => reloaded = true,
